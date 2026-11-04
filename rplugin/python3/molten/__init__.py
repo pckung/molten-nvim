@@ -1064,6 +1064,40 @@ class Molten:
                 outbuf.toggle_virtual_output(cell.end)
                 return
 
+    @pynvim.command("MoltenToggleExpandOutput", nargs="0", sync=True, bang=True)  # type: ignore
+    @nvimui  # type: ignore
+    def command_toggle_expand_output(self, args: List[Any], bang: bool) -> None:
+        """
+        Expand the inline (virtual text) output of the cell under the cursor to its full length,
+        or collapse it back to `molten_virt_text_max_lines`. With a bang, do it for every cell in
+        the buffer: expand them all, or collapse them all if they're all expanded already.
+        """
+        kernels = self._get_current_buf_kernels(True)
+        assert kernels is not None
+
+        if not self.options.virt_text_output:
+            notify_warn(
+                self.nvim,
+                "Inline output is off (molten_virt_text_output = false); "
+                "use :MoltenEnterOutput to see the whole output",
+            )
+            return
+
+        if bang:
+            outputs = [(cell, out) for kern in kernels for cell, out in kern.outputs.items()]
+            expand = any(not out.virt_expanded for _, out in outputs)
+            for cell, out in outputs:
+                out.set_virt_expanded(cell.end, expand)
+            return
+
+        for kern in kernels:
+            cell = kern._get_selected_span()
+            if cell is not None:
+                out = kern.outputs[cell]
+                out.set_virt_expanded(cell.end, not out.virt_expanded)
+                return
+        notify_warn(self.nvim, "Put the cursor in a cell that has output")
+
     @pynvim.command("MoltenYankOutput", nargs="0", sync=True, bang=True)  # type: ignore
     @nvimui  # type: ignore
     def command_yank_output(self, _args: List[Any], bang: bool) -> None:

@@ -50,6 +50,8 @@ class OutputBuffer:
         self.display_win: Window | None = None
         self.display_virt_lines = None
         self.virt_hidden: bool = False
+        # show the whole output inline, ignoring virt_text_max_lines (:MoltenToggleExpandOutput)
+        self.virt_expanded: bool = False
         self.extmark_namespace = extmark_namespace
         self.virt_text_id = None
         self.displayed_status = OutputStatus.HOLD
@@ -180,6 +182,18 @@ class OutputBuffer:
         if redraw:
             self.canvas.present()
 
+    def set_virt_expanded(self, anchor: Position, expanded: bool) -> None:
+        """Show the whole inline output (expanded) or cut it to virt_text_max_lines, and redraw."""
+        self.virt_expanded = expanded
+        if self.virt_hidden:
+            return
+        if self.virt_text_id is not None:
+            self.nvim.funcs.nvim_buf_del_extmark(
+                anchor.bufno, self.extmark_namespace, self.virt_text_id
+            )
+            self.virt_text_id = None  # lets show_virtual_output draw a finished output again
+        self.show_virtual_output(anchor)
+
     def toggle_virtual_output(self, anchor: Position) -> None:
         if self.virt_hidden:
             # currently suppressed ⇒ un‐suppress and show
@@ -284,7 +298,7 @@ class OutputBuffer:
         )
         lines, _ = self.build_output_text(shape, anchor.bufno, True)
 
-        if len(lines) > self.options.virt_text_max_lines:
+        if not self.virt_expanded and len(lines) > self.options.virt_text_max_lines:
             lines = self.truncate_lines(lines, self.options.virt_text_max_lines)
 
         self.virt_text_id = buf.api.set_extmark(
