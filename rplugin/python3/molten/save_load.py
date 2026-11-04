@@ -8,7 +8,7 @@ from molten.position import DynamicPosition
 
 from molten.utils import MoltenException
 from molten.options import MoltenOptions
-from molten.outputchunks import OutputStatus, Output, to_outputchunk
+from molten.outputchunks import ErrorOutputChunk, OutputChunk, OutputStatus, Output, to_outputchunk
 from molten.outputbuffer import OutputBuffer
 from molten.moltenbuffer import MoltenKernel
 
@@ -37,6 +37,37 @@ def get_default_save_file(options: MoltenOptions, buffer: Buffer) -> str:
     mangled_name = buffer.name.replace("%", "%%").replace("/", "%")
 
     return os.path.join(options.save_path, mangled_name + ".json")
+
+
+def _save_chunk(chunk: OutputChunk) -> Optional[Dict[str, Any]]:
+    """One output chunk in the save file's format, or None if it can't be saved.
+
+    Regular outputs are Jupyter mime bundles: {"data": ..., "metadata": ...}. Errors carry no
+    mime bundle, so they're saved as {"error": {"ename", "evalue", "traceback"}}, the fields of a
+    Jupyter error output."""
+    if isinstance(chunk, ErrorOutputChunk):
+        extras = getattr(chunk, "extras", None) or {}
+        if "ename" not in extras:
+            return None
+        return {
+            "error": {
+                "ename": extras["ename"],
+                "evalue": extras.get("evalue", ""),
+                "traceback": list(extras.get("traceback", [])),
+            }
+        }
+    if chunk.jupyter_data is not None and chunk.jupyter_metadata is not None:
+        return {"data": chunk.jupyter_data, "metadata": chunk.jupyter_metadata}
+    return None
+
+
+def _load_error_chunk(error: Dict[str, Any]) -> ErrorOutputChunk:
+    MoltenIOError.assert_has_key(error, "ename", str)
+    MoltenIOError.assert_has_key(error, "evalue", str)
+    MoltenIOError.assert_has_key(error, "traceback", list)
+    chunk = ErrorOutputChunk(error["ename"], error["evalue"], error["traceback"])
+    chunk.extras = {k: error[k] for k in ("ename", "evalue", "traceback")}
+    return chunk
 
 
 def load(nvim: Nvim, moltenbuffer: MoltenKernel, nvim_buffer: Buffer, data: Dict[str, Any]) -> None:
@@ -84,6 +115,10 @@ def load(nvim: Nvim, moltenbuffer: MoltenKernel, nvim_buffer: Buffer, data: Dict
 
         MoltenIOError.assert_has_key(cell, "chunks", list)
         for chunk in cell["chunks"]:
+            if "error" in chunk:
+                MoltenIOError.assert_has_key(chunk, "error", dict)
+                output.chunks.append(_load_error_chunk(chunk["error"]))
+                continue
             MoltenIOError.assert_has_key(chunk, "data", dict)
             MoltenIOError.assert_has_key(chunk, "metadata", dict)
             output.chunks.append(
@@ -130,12 +165,9 @@ def save(molten_kernel: MoltenKernel, nvim_buffer: int) -> Dict[str, Any]:
                 "status": output.output.status.value,
                 "success": output.output.success,
                 "chunks": [
-                    {
-                        "data": chunk.jupyter_data,
-                        "metadata": chunk.jupyter_metadata,
-                    }
+                    saved
                     for chunk in output.output.chunks
-                    if chunk.jupyter_data is not None and chunk.jupyter_metadata is not None
+                    if (saved := _save_chunk(chunk)) is not None
                 ],
             }
             for span, output in molten_kernel.outputs.items()
