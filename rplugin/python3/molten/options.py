@@ -39,6 +39,7 @@ class MoltenOptions:
     cover_lines_starting_with: List[str]
     copy_output: bool
     enter_output_behavior: str
+    html_table_output: str
     image_location: str
     image_provider: str
     limit_output_chars: int
@@ -82,6 +83,9 @@ class MoltenOptions:
             ("molten_cover_lines_starting_with", []),
             ("molten_copy_output", False),
             ("molten_enter_output_behavior", "open_then_enter"),
+            # show HTML tables as text: "auto" when there's no useful plain-text version (pandas
+            # Styler, IPython HTML()), "always" in place of the plain text too, or "never"
+            ("molten_html_table_output", "auto"),
             ("molten_image_location", "both"), # "both", "float", "virt"
             ("molten_image_provider", "none"),
             ("molten_open_cmd", None),
