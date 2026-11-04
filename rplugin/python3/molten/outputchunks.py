@@ -177,6 +177,47 @@ class ImageOutputChunk(OutputChunk):
         return " \n", canvas.img_size(self.img_identifier)["height"]
 
 
+# matplotlib's `anim.to_jshtml()` (also what `rcParams["animation.html"] = "jshtml"` displays)
+# embeds every frame as `frames[i] = "data:image/png;base64,..."` and plays them with
+# `new Animation(frames, img_id, slider_id, <interval ms>, ...)`
+_JSHTML_FRAME = re.compile(r'frames\[(\d+)\]\s*=\s*"data:image/(png|jpeg|jpg|gif);base64,([^"]*)"')
+_JSHTML_INTERVAL = re.compile(r"new Animation\(\s*frames\s*,\s*img_id\s*,\s*slider_id\s*,\s*([\d.]+)")
+
+
+class AnimationOutputChunk(ImageOutputChunk):
+    """A matplotlib animation: shows the first frame; `:MoltenToggleAnimation` plays it in place."""
+
+    def __init__(self, frames: List[str], interval_ms: float):
+        super().__init__(frames[0])
+        self.frames = frames
+        self.interval_ms = interval_ms
+
+    def place(
+        self,
+        bufnr: int,
+        options: MoltenOptions,
+        col: int,
+        lineno: int,
+        shape: Tuple[int, int, int, int],
+        canvas: Canvas,
+        virtual: bool,
+        winnr: int | None = None,
+    ) -> Tuple[str, int]:
+        fps = 1000 / self.interval_ms if self.interval_ms > 0 else 0
+        hint = f"󰐊 animation: {len(self.frames)} frames at {fps:.0f} fps, :MoltenToggleAnimation plays it"
+        text, height = super().place(bufnr, options, col, lineno + 1, shape, canvas, virtual, winnr)
+        return f"{hint}\n{text}", height
+
+
+def animation_frames_from_html(html: str) -> Tuple[List[Tuple[str, str]], float]:
+    """(extension, base64 data) of each frame of a jshtml animation, and the frame interval."""
+    found = {}
+    for m in _JSHTML_FRAME.finditer(html):
+        found[int(m.group(1))] = ("jpg" if m.group(2) == "jpeg" else m.group(2), m.group(3))
+    interval = _JSHTML_INTERVAL.search(html)
+    return [found[i] for i in sorted(found)], float(interval.group(1)) if interval else 100.0
+
+
 class OutputStatus(Enum):
     HOLD = 0
     """Waiting to run this cell"""
@@ -316,6 +357,20 @@ def to_outputchunk(
                 case ["image", extension]:
                     chunk = _from_image(extension, data[mimetype])
                     break
+
+    if chunk is None and data is not None and isinstance(data.get("text/html"), str):
+        html = data["text/html"]
+        if "new Animation(frames" in html:
+            frames, interval = animation_frames_from_html(html)
+            if frames:
+                import base64
+
+                paths = []
+                for ext, b64 in frames:
+                    with alloc_file(ext, "wb") as (path, file):
+                        file.write(base64.b64decode(b64))  # type: ignore
+                    paths.append(path)
+                chunk = AnimationOutputChunk(paths, interval)
 
     if chunk is None and data is not None and isinstance(data.get("text/html"), str):
         # tables in HTML-only outputs (pandas Styler, IPython HTML) would otherwise show up as

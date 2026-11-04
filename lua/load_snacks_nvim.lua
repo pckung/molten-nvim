@@ -40,6 +40,12 @@ snacks_api.clear = function(identifier)
   end
 end
 
+--- the snacks placement currently showing an image (used to play animations, see molten.animation)
+snacks_api.get_placement = function(identifier)
+  local img = images[identifier]
+  return img and img.placement or nil
+end
+
 snacks_api.clear_all = function()
   for _, img in pairs(images) do
     snacks_api.clear(img)

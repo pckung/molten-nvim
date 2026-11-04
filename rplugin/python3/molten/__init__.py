@@ -14,6 +14,7 @@ from molten.save_load import MoltenIOError, get_default_save_file, load, save
 from molten.moltenbuffer import MoltenKernel
 from molten.options import MoltenOptions
 from molten.outputbuffer import OutputBuffer
+from molten.outputchunks import AnimationOutputChunk
 from molten.position import DynamicPosition, Position
 from molten.runtime import get_available_kernels
 from molten.utils import MoltenException, notify_error, notify_info, notify_warn, nvimui
@@ -1063,6 +1064,50 @@ class Molten:
                 outbuf = kern.outputs[cell]
                 outbuf.toggle_virtual_output(cell.end)
                 return
+
+    @pynvim.command("MoltenToggleAnimation", nargs="0", sync=True, bang=True)  # type: ignore
+    @nvimui  # type: ignore
+    def command_toggle_animation(self, args: List[Any], bang: bool) -> None:
+        """
+        Play / stop the matplotlib animation (`anim.to_jshtml()`) in the output of the cell under
+        the cursor, in place. With a bang, stop every animation that is playing.
+        Needs `molten_image_provider = "snacks.nvim"`.
+        """
+        if bang:
+            self.nvim.exec_lua("require('molten.animation').stop_all()")
+            return
+        kernels = self._get_current_buf_kernels(True)
+        assert kernels is not None
+        if self.options.image_provider != "snacks.nvim":
+            notify_warn(
+                self.nvim,
+                "Playing animations needs molten_image_provider = \"snacks.nvim\"; "
+                "use :MoltenOpenInBrowser to watch it in the browser",
+            )
+            return
+        for kern in kernels:
+            cell = kern._get_selected_span()
+            if cell is None:
+                continue
+            for chunk in kern.outputs[cell].output.chunks:
+                if isinstance(chunk, AnimationOutputChunk):
+                    if not chunk.img_identifier:
+                        notify_warn(self.nvim, "Show the output first (it's hidden)")
+                        return
+                    playing = self.nvim.exec_lua(
+                        "return require('molten.animation').toggle(...)",
+                        chunk.img_identifier,
+                        chunk.frames,
+                        chunk.interval_ms,
+                    )
+                    if playing:
+                        notify_info(
+                            self.nvim,
+                            f"Playing {len(chunk.frames)} frames (the first loop is slower while "
+                            "frames load); run it again to stop",
+                        )
+                    return
+        notify_warn(self.nvim, "No animation in the output of the cell under the cursor")
 
     @pynvim.command("MoltenToggleExpandOutput", nargs="0", sync=True, bang=True)  # type: ignore
     @nvimui  # type: ignore
