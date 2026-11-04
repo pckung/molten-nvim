@@ -2,6 +2,7 @@
 --
 --   require("molten.remote").setup({
 --     hosts = {
+--       mine = { port = 8888 },  -- you forward the port yourself; molten only connects to it
 --       gpu = { host = "me@gpu-box", start_server = true, cwd = "~/project" },
 --       lab = { host = "lab", remote_port = 8888 }, -- a server that is already running
 --     },
@@ -52,7 +53,10 @@ local defaults = {
 }
 
 local host_defaults = {
-  host = nil, -- ssh destination: "user@host", or a Host alias from ~/.ssh/config (required)
+  -- Direct mode: the server is already reachable on this local port (you forward it yourself).
+  -- No ssh is run. The token comes from `token`, $JUPYTER_TOKEN, or a prompt.
+  port = nil,
+  host = nil, -- ssh destination: "user@host", or a Host alias from ~/.ssh/config
   ssh_args = {}, -- extra ssh args for this host, e.g. { "-J", "bastion" } or { "-p", "2222" }
   start_server = false, -- start `jupyter_cmd` on the remote (and stop it on disconnect)
   remote_port = nil, -- port of the server on the remote. Existing server: discovered if nil
@@ -287,12 +291,15 @@ end
 local function resolve_profile(name)
   local p = config.hosts[name]
   if p == nil then
-    -- ad-hoc: `:MoltenRemoteConnect user@host`
-    p = { host = name }
+    -- ad-hoc: `:MoltenRemoteConnect 8888` / `localhost:8888` (already forwarded port), or
+    -- `:MoltenRemoteConnect user@host` (ssh)
+    local port = tonumber(name) or tonumber(name:match("^localhost:(%d+)$"))
+      or tonumber(name:match("^127%.0%.0%.1:(%d+)$")) or tonumber(name:match("^:(%d+)$"))
+    p = port and { port = port } or { host = name }
   end
   p = vim.tbl_extend("force", vim.deepcopy(host_defaults), p)
-  if not p.host then
-    error("host profile '" .. name .. "' has no `host`")
+  if not p.host and not p.port then
+    error("host profile '" .. name .. "' needs `port` (already forwarded) or `host` (ssh)")
   end
   return p
 end
@@ -321,7 +328,8 @@ local function fail(conn, msg)
 end
 
 local function poll_until_ready(conn)
-  local deadline = uv.now() + config.startup_timeout * 1000
+  local timeout = conn.direct and math.min(config.startup_timeout, 5) or config.startup_timeout
+  local deadline = uv.now() + timeout * 1000
   local function poll()
     if conn.status ~= "connecting" then
       return
@@ -332,13 +340,29 @@ local function poll_until_ready(conn)
       end
       if status == 200 then
         conn.status = "connected"
-        notify(string.format("%s: connected (localhost:%d -> %s:%d)", conn.name, conn.local_port,
-          conn.profile.host, conn.remote_port))
+        if conn.direct then
+          notify(string.format("%s: connected (localhost:%d)", conn.name, conn.local_port))
+        else
+          notify(string.format("%s: connected (localhost:%d -> %s:%d)", conn.name,
+            conn.local_port, conn.profile.host, conn.remote_port))
+        end
         on_ready(conn)
       elseif status == 401 or status == 403 then
+        if conn.direct and not conn.asked_token then
+          -- no/incorrect token: ask once (input is hidden)
+          conn.asked_token = true
+          local token = vim.fn.inputsecret("Jupyter token for localhost:" .. conn.local_port .. ": ")
+          if token ~= "" then
+            conn.token = token
+            return poll()
+          end
+        end
         fail(conn, "the server rejected the token")
       elseif uv.now() > deadline then
-        fail(conn, "timed out waiting for the Jupyter Server")
+        fail(conn, conn.direct
+          and ("no Jupyter Server answering on localhost:" .. conn.local_port
+            .. ". Is the port forward up?")
+          or "timed out waiting for the Jupyter Server")
       else
         vim.defer_fn(poll, 500)
       end
@@ -408,10 +432,24 @@ local function ensure_connection(name, cb)
     status = "connecting",
     log = {},
     waiters = { cb },
-    local_port = profile.local_port or free_port(),
+    direct = profile.host == nil,
+    local_port = profile.port or profile.local_port or free_port(),
     base_url = normalize_base_url(profile.base_url),
   }
   connections[name] = conn
+
+  local token = profile.token
+  if type(token) == "function" then
+    token = token()
+  end
+
+  if conn.direct then
+    -- the port is already forwarded (or the server is local): just talk to it
+    conn.remote_port = conn.local_port
+    conn.token = token or vim.env.JUPYTER_TOKEN
+    return poll_until_ready(conn)
+  end
+
   notify(name .. ": connecting to " .. profile.host .. " ...")
 
   if profile.start_server then
@@ -421,10 +459,6 @@ local function ensure_connection(name, cb)
     return open_tunnel(conn)
   end
 
-  local token = profile.token
-  if type(token) == "function" then
-    token = token()
-  end
   if profile.remote_port and token ~= nil then
     conn.remote_port = profile.remote_port
     conn.token = token
@@ -625,7 +659,7 @@ function M.status()
   for n, conn in pairs(connections) do
     out[n] = {
       status = conn.status,
-      host = conn.profile.host,
+      host = conn.profile.host or "localhost (direct)",
       local_port = conn.local_port,
       remote_port = conn.remote_port,
       started_server = conn.profile.start_server,

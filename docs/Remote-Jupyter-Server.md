@@ -7,13 +7,36 @@ close neovim, and you can reconnect to them later**.
 ## Requirements
 
 - Locally: the python packages `requests` and `websocket-client` (in molten's python env), and an
-  `ssh` client.
+  `ssh` client (not needed if you forward the port yourself).
 - Remote: `jupyter_server` (or `notebook`/`jupyterlab`, which bring it) plus the kernels you want.
-- Non-interactive SSH login. Neovim can't type a password for you, so use keys or `ssh-agent`.
+- When molten runs ssh: non-interactive SSH login. Neovim can't type a password for you, so use keys or `ssh-agent`.
   For hosts that need a password or 2FA, set up `ControlMaster` in `~/.ssh/config` and log in once
   from a terminal. molten's ssh then reuses that connection.
 
-## Setup
+## Already forwarding the port yourself?
+
+If your workflow already sets up the port forward (`ssh -L 8888:localhost:8888 ...`, VS Code, a
+script, ...), molten doesn't need ssh at all. Point it at the local port:
+
+```vim
+:MoltenRemoteConnect 8888
+```
+
+or give it a name in your config:
+
+```lua
+require("molten.remote").setup({
+  hosts = {
+    lab = { port = 8888 },  -- token: `token = "..."`, else $JUPYTER_TOKEN, else you're asked
+  },
+})
+```
+
+Reconnecting to running kernels and `:MoltenRemoteAttach` work the same way. If nothing answers on
+the port within 5 seconds, you get an error asking whether the forward is up. `token` can also be a
+function, e.g. `token = function() return vim.fn.readfile(vim.fn.expand("~/.jupyter_token"))[1] end`.
+
+## Setup (molten runs ssh)
 
 ```lua
 require("molten.remote").setup({
@@ -56,7 +79,7 @@ All options with their defaults are at the top of
 
 | Command | Description |
 |---------|-------------|
-| `:MoltenRemoteConnect {host} [kernel]` | Open the tunnel (and start the server, if configured). Then initialize molten in the current buffer with **this file's kernel if one is still running on the server**, or a new one. `{host}` is a profile name or any ssh destination (`user@host`). With `!`, only open the tunnel. |
+| `:MoltenRemoteConnect {host} [kernel]` | `{host}` can also be a port (`8888`, `localhost:8888`) that is already forwarded. Open the tunnel (and start the server, if configured). Then initialize molten in the current buffer with **this file's kernel if one is still running on the server**, or a new one. `{host}` is a profile name or any ssh destination (`user@host`). With `!`, only open the tunnel. |
 | `:MoltenRemoteAttach {host} [kernel_id]` | Pick any running kernel on the server (this file's comes first, and the list shows which file or notebook each one belongs to) and attach the current buffer to it. Molten never shuts down a kernel it attached to. |
 | `:MoltenRemoteDisconnect [host]` | Close the tunnel (all of them without an argument). A server molten started is stopped, together with its kernels. |
 | `:MoltenRemoteStatus` | List connections. |
