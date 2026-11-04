@@ -152,13 +152,15 @@ class OutputBuffer:
             if self.display_win.valid:
                 self.nvim.funcs.nvim_win_close(self.display_win, True)
             self.display_win = None
-            redraw = False
-            for chunk in self.output.chunks:
-                if isinstance(chunk, ImageOutputChunk) and chunk.img_identifier is not None:
-                    self.canvas.remove_image(chunk.img_identifier)
-                    redraw = True
-            if redraw:
-                self.canvas.present()
+        # the output window's copies of images (also if the window was closed some other way)
+        redraw = False
+        for chunk in self.output.chunks:
+            if isinstance(chunk, ImageOutputChunk) and chunk.float_identifier is not None:
+                self.canvas.remove_image(chunk.float_identifier)
+                chunk.float_identifier = None
+                redraw = True
+        if redraw:
+            self.canvas.present()
         if self.display_virt_lines is not None:
             del self.display_virt_lines
             self.display_virt_lines = None
@@ -176,8 +178,9 @@ class OutputBuffer:
         # clear any inline images, etc.
         redraw = False
         for chunk in self.output.chunks:
-            if isinstance(chunk, ImageOutputChunk) and chunk.img_identifier is not None:
-                self.canvas.remove_image(chunk.img_identifier)
+            if isinstance(chunk, ImageOutputChunk) and chunk.virt_identifier is not None:
+                self.canvas.remove_image(chunk.virt_identifier)
+                chunk.virt_identifier = None
                 redraw = True
         if redraw:
             self.canvas.present()
@@ -212,7 +215,10 @@ class OutputBuffer:
                 {"scope": "local", "win": self.display_win.handle},
             )
 
-    def build_output_text(self, shape, buf: int, virtual: bool) -> Tuple[List[str], int]:
+    def build_output_text(
+        self, shape, buf: int, virtual: bool, images: bool = True
+    ) -> Tuple[List[str], int]:
+        """images=False: just the text (e.g. to copy it), without placing any images"""
         lineno = 1  # we add a status line at the top in the end
         lines_str = ""
         # images are rendered with virtual lines by image.nvim
@@ -223,6 +229,8 @@ class OutputBuffer:
                 y = lineno
                 if virtual:
                     y = shape[1]
+                if not images and isinstance(chunk, ImageOutputChunk):
+                    continue
                 chunktext, virt_lines = chunk.place(
                     buf,
                     self.options,

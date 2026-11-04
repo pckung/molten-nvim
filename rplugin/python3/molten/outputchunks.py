@@ -147,7 +147,15 @@ class ImageOutputChunk(OutputChunk):
     def __init__(self, img_path: str):
         self.img_path = img_path
         self.output_type = "display_data"
-        self.img_identifier = None
+        # the copy drawn inline (virtual text) and the copy in the output window are separate
+        # images; remember both, so each is removed with its own output
+        self.virt_identifier: Optional[str] = None
+        self.float_identifier: Optional[str] = None
+
+    @property
+    def img_identifier(self) -> Optional[str]:
+        """the identifier of a copy currently shown (inline first)"""
+        return self.virt_identifier or self.float_identifier
 
     def place(
         self,
@@ -164,7 +172,7 @@ class ImageOutputChunk(OutputChunk):
         if not (loc == "both" or (loc == "virt" and virtual) or (loc == "float" and not virtual)):
             return "", 0
 
-        self.img_identifier = canvas.add_image(
+        identifier = canvas.add_image(
             self.img_path,
             f"{'virt-' if virtual else ''}{self.img_path}",
             0,
@@ -172,9 +180,13 @@ class ImageOutputChunk(OutputChunk):
             bufnr,
             winnr,
         )
+        if virtual:
+            self.virt_identifier = identifier
+        else:
+            self.float_identifier = identifier
         # images are rendered into virtual lines following the current line,
         # which also needs to exist as the extmark is placed there
-        return " \n", canvas.img_size(self.img_identifier)["height"]
+        return " \n", canvas.img_size(identifier)["height"]
 
 
 # matplotlib's `anim.to_jshtml()` (also what `rcParams["animation.html"] = "jshtml"` displays)

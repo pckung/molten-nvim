@@ -1096,7 +1096,8 @@ class Molten:
                         return
                     playing = self.nvim.exec_lua(
                         "return require('molten.animation').toggle(...)",
-                        chunk.img_identifier,
+                        # the inline copy and the output window's copy (see ImageOutputChunk.place)
+                        ["virt-" + chunk.img_path, chunk.img_path],
                         chunk.frames,
                         chunk.interval_ms,
                     )
@@ -1164,7 +1165,7 @@ class Molten:
             # Get window width for proper text wrapping
             win_width = self.nvim.current.window.width
             shape = (0, 0, win_width, 0)  # (win_col, win_row, win_width, win_height)
-            lines, _ = outbuf.build_output_text(shape, bufno, False)
+            lines, _ = outbuf.build_output_text(shape, bufno, False, images=False)
             lines = lines[1:]  # Remove header
             if not lines:
                 notify_warn(

@@ -10,6 +10,15 @@ local snacks_api = {}
 local images = {}
 
 snacks_api.from_file = function(path, opts)
+  -- key by molten's identifier: the inline copy ("virt-<path>") and the output window's copy
+  -- (<path>) are separate images. Keying by path made them overwrite each other.
+  local id = opts.id or path
+  local old = images[id]
+  if old and old.placement then
+    -- re-drawing an output: remove the image already on screen, or it stays there as a copy
+    old.placement:close()
+  end
+  opts.path = path
   opts.opts = {
     inline = true,
     pos = { opts.y, opts.x },
@@ -20,15 +29,15 @@ snacks_api.from_file = function(path, opts)
   }
   opts.placement = nil
 
-  images[path] = opts
-  return path
+  images[id] = opts
+  return id
 end
 
 snacks_api.render = function(identifier)
   local img = images[identifier]
 
   if img.placement == nil then
-    img.placement = Snacks.image.placement.new(img.buffer, identifier, img.opts)
+    img.placement = Snacks.image.placement.new(img.buffer, img.path, img.opts)
   end
 end
 
@@ -47,8 +56,8 @@ snacks_api.get_placement = function(identifier)
 end
 
 snacks_api.clear_all = function()
-  for _, img in pairs(images) do
-    snacks_api.clear(img)
+  for id in pairs(images) do
+    snacks_api.clear(id)
   end
 end
 
@@ -56,7 +65,7 @@ end
 snacks_api.image_size = function(identifier)
   local img = images[identifier]
   local size =
-    snacks.image.util.fit(identifier, { width = img.opts.max_width, height = img.opts.max_height })
+    snacks.image.util.fit(img.path, { width = img.opts.max_width, height = img.opts.max_height })
   return size
 end
 
