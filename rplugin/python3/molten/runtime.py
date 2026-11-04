@@ -50,6 +50,10 @@ class JupyterRuntime:
             self.kernel_client = self.kernel_manager.client()
             self.kernel_client.start_channels()
             self.options = options
+            if self.kernel_manager.reattached:
+                self.nvim.out_write(
+                    f"[Molten] Reattached to running kernel {self.kernel_manager.kernel_id[:8]}\n"
+                )
         elif ".json" not in self.kernel_name:
             self.external_kernel = False
             self.kernel_manager = jupyter_client.manager.KernelManager(kernel_name=kernel_name)
@@ -222,6 +226,16 @@ class JupyterRuntime:
 
         if output is None:
             return did_stuff
+
+        if isinstance(self.kernel_client, JupyterAPIClient):
+            error = self.kernel_client.connection_error
+            if error is not None and output.status != OutputStatus.DONE:
+                # e.g. the SSH tunnel went away: don't leave the cell "running" forever
+                output.success = False
+                output.chunks.append(ErrorOutputChunk("ConnectionError", error, []))
+                output.status = OutputStatus.DONE
+                self.state = RuntimeState.IDLE
+                return True
 
         while True:
             try:

@@ -41,6 +41,10 @@ installed.
 
 ### Remote hosts
 
+> [!TIP]
+> For a remote Jupyter Server reached over SSH, with reconnecting to running kernels, see
+> [Remote Jupyter Server](./Remote-Jupyter-Server.md).
+
 > [!NOTE]
 > I've not tested this, but it should work
 

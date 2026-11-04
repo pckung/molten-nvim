@@ -60,6 +60,9 @@ Configuration information is located [further down](#configuration) in this READ
 
 To setup molten for editing Jupyter Notebook files, see [Notebook Setup](./docs/Notebook-Setup.md).
 
+To run kernels on a remote machine through SSH port forwarding, and reconnect to them later, see
+[Remote Jupyter Server](./docs/Remote-Jupyter-Server.md).
+
 ## Usage
 
 Start by initializing a kernel. This kernel will get a _kernel_id_ which is most commonly just the

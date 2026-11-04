@@ -46,6 +46,14 @@ M.check = function()
   py_mod_check("pyperclip", "pyperclip", false)
   py_mod_check("nbformat", "nbformat", false)
   py_mod_check("PIL", "pillow", false)
+  py_mod_check("requests", "requests", false)
+  py_mod_check("websocket", "websocket-client", false)
+
+  if vim.fn.executable("ssh") == 1 then
+    vim.health.ok("ssh found (for require('molten.remote'))")
+  else
+    vim.health.warn("ssh not found; require('molten.remote') needs it")
+  end
 end
 
 return M

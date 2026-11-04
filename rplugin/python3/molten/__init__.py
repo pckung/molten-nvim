@@ -262,6 +262,14 @@ class Molten:
 
             self.nvim.lua._prompt_init(kernels, PROMPT)
 
+    @pynvim.function("MoltenInitUrl", sync=True)  # type: ignore
+    @nvimui  # type: ignore
+    def function_init_url(self, args: List[str]) -> None:
+        """Like `:MoltenInit <url>`, but the URL isn't subject to Ex-command expansion of % and #
+        (which URL-encoded query strings are full of). Used by `molten.remote`."""
+        self._initialize_if_necessary()
+        self._initialize_buffer(args[0])
+
     def _deinit_buffer(self, molten_kernels: List[MoltenKernel]) -> None:
         # Have to copy this to get around reference issues
         for kernel in [x for x in molten_kernels]:
