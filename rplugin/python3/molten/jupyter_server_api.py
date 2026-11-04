@@ -26,6 +26,7 @@ import uuid
 from queue import Empty as EmptyQueueException
 from queue import Queue
 from threading import Lock, Thread
+from types import SimpleNamespace
 from typing import Any, Dict, Optional, Set
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -340,6 +341,28 @@ class JupyterAPIManager:
     @property
     def kernel_id(self) -> str:
         return self._kernel_info["id"]
+
+    @property
+    def kernel_spec(self) -> SimpleNamespace:
+        """Like jupyter_client's KernelSpec (language, argv, resource_dir), read from the server.
+        Used by :MoltenExportOutput / :MoltenImportOutput and :MoltenInfo."""
+        if getattr(self, "_kernel_spec", None) is None:
+            name = self._kernel_info.get("name", "")
+            spec: Dict[str, Any] = {}
+            try:
+                response = self.requests.get(f"{self._base_url}/api/kernelspecs/{name}",
+                                             headers=self._headers, timeout=REQUEST_TIMEOUT)
+                spec = response.json().get("spec", {}) if response.ok else {}
+            except Exception:
+                pass
+            self._kernel_spec = SimpleNamespace(
+                name=name,
+                language=spec.get("language", "python"),
+                argv=spec.get("argv", []),
+                resource_dir=f"(on the server) {self._base_url}",
+                display_name=spec.get("display_name", name),
+            )
+        return self._kernel_spec
 
     def client(self) -> JupyterAPIClient:
         return JupyterAPIClient(

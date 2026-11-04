@@ -1,6 +1,8 @@
 import math
 import jupyter_client
 
+from molten.utils import redact
+
 
 def create_info_window(nvim, molten_kernels, buffers, initialized):
     buf = nvim.current.buffer.number
@@ -90,6 +92,7 @@ def create_info_window(nvim, molten_kernels, buffers, initialized):
 
 
 def draw_kernel_info(buf, running, kernel_name, language, argv, resource_dir):
+    kernel_name = redact(kernel_name)
     buf.append(f" Kernel: {kernel_name} {running}")
     buf.api.add_highlight(-1, "Title", len(buf) - 1, 8, 9 + len(kernel_name))
     buf.append(f"   language:     {language}")

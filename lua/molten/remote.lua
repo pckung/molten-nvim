@@ -42,6 +42,10 @@ local defaults = {
   -- :MoltenRemoteConnect can reattach to them later (like VS Code). Kernels of a server started
   -- by molten (start_server = true) still go away when the server is stopped.
   keep_kernels = true,
+  -- save cell outputs whenever you write a file that uses a remote kernel, and show them again
+  -- the next time you connect from that file (like outputs stored in a notebook). Saved to
+  -- stdpath("data")/molten-remote/, without the server token.
+  save_outputs = true,
   -- name of the Jupyter session for a buffer. Connecting from a buffer whose session already
   -- exists on the server reattaches to that kernel. Return nil to always start a new kernel.
   session_name = function(buf)
@@ -506,15 +510,84 @@ local function server_url(conn, params)
   return url
 end
 
+-- saved outputs ---------------------------------------------------------------------------
+
+local function outputs_file(buf)
+  local name = vim.api.nvim_buf_get_name(buf)
+  if name == "" then
+    return nil
+  end
+  -- one flat file per source file; only plain characters, since molten's commands don't
+  -- unescape their arguments
+  local flat = name:gsub("[^%w%.%-_]", "_")
+  return vim.fn.stdpath("data") .. "/molten-remote/" .. flat .. ".json"
+end
+
+local function buf_checksum(buf)
+  return vim.fn.sha256(table.concat(vim.api.nvim_buf_get_lines(buf, 0, -1, true), "\n"))
+end
+
+local function read_json(path)
+  local ok, lines = pcall(vim.fn.readfile, path)
+  if not ok then
+    return nil
+  end
+  local ok_json, data = pcall(vim.json.decode, table.concat(lines, "\n"))
+  return ok_json and type(data) == "table" and data or nil
+end
+
+--- Save the outputs of `buf` (current buffer if nil). Called after every write.
+function M.save_outputs(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local path = outputs_file(buf)
+  if not path or not vim.b[buf].molten_remote then
+    return
+  end
+  vim.api.nvim_buf_call(buf, function()
+    pcall(vim.fn.MoltenSaveOutputs, path)
+  end)
+end
+
+--- If `buf` has saved outputs that still match its contents, load them with a kernel from `url`.
+--- Returns true if it did (molten is then initialized for the buffer).
+local function restore_outputs(buf, url)
+  local path = outputs_file(buf)
+  local data = path and vim.fn.filereadable(path) == 1 and read_json(path)
+  if not data then
+    return false
+  end
+  if data.molten_remote_checksum ~= buf_checksum(buf) then
+    notify("this file changed since its outputs were saved, so they weren't restored",
+      vim.log.levels.INFO)
+    return false
+  end
+  data.kernel = url
+  local tmp = vim.fn.tempname() .. ".json" -- no spaces: :MoltenLoad splits its arguments
+  vim.fn.writefile({ vim.json.encode(data) }, tmp)
+  pcall(vim.cmd, "MoltenLoad " .. tmp)
+  vim.fn.delete(tmp)
+  local restored = #vim.fn.MoltenRunningKernels(true) > 0
+  if restored then
+    notify(string.format("restored the outputs of %d cell(s)", #(data.cells or {})))
+  end
+  return restored
+end
+
 local function molten_init(buf, url)
   if not vim.api.nvim_buf_is_valid(buf) then
     return
   end
   vim.api.nvim_buf_call(buf, function()
+    if config.save_outputs and restore_outputs(buf, url) then
+      vim.b[buf].molten_remote = true
+      return
+    end
     -- not `:MoltenInit url`: Ex commands would expand the % and # in the query string
     local ok, err = pcall(vim.fn.MoltenInitUrl, url)
     if not ok then
       notify("MoltenInit failed: " .. tostring(err), vim.log.levels.ERROR)
+    elseif #vim.fn.MoltenRunningKernels(true) > 0 then
+      vim.b[buf].molten_remote = true
     end
   end)
 end
@@ -747,12 +820,24 @@ function M.setup(opts)
     M.show_log(a.fargs[1])
   end, { nargs = 1, complete = complete_connections, desc = "Show ssh/jupyter output" })
 
+  local group = vim.api.nvim_create_augroup("molten-remote", { clear = true })
   vim.api.nvim_create_autocmd("VimLeavePre", {
-    group = vim.api.nvim_create_augroup("molten-remote", { clear = true }),
+    group = group,
     callback = function()
       M.disconnect()
     end,
   })
+  vim.api.nvim_create_autocmd("BufWritePost", {
+    group = group,
+    callback = function(ev)
+      if config.save_outputs and vim.b[ev.buf].molten_remote then
+        M.save_outputs(ev.buf)
+      end
+    end,
+  })
+  cmd("MoltenRemoteSaveOutputs", function()
+    M.save_outputs()
+  end, { desc = "Save this file's outputs now (also happens on every write)" })
 end
 
 return M

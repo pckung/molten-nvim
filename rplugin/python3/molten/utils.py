@@ -1,4 +1,11 @@
+import re
+
 from pynvim import Nvim
+
+
+def redact(msg: str) -> str:
+    """Hide Jupyter Server tokens: remote kernels are named after a URL that carries one."""
+    return re.sub(r"(token=)[^&\s'`\"]+", r"\1***", msg)
 
 
 class MoltenException(Exception):
@@ -10,12 +17,13 @@ def nvimui(func):  # type: ignore
         try:
             func(self, *args, **kwargs)
         except MoltenException as err:
-            self.nvim.err_write("[Molten] " + str(err) + "\n")
+            self.nvim.err_write("[Molten] " + redact(str(err)) + "\n")
 
     return inner
 
 
 def _notify(nvim: Nvim, msg: str, log_level: str) -> None:
+    msg = redact(msg)
     lua = f"""
         vim.schedule_wrap(function()
             vim.notify([[[Molten] {msg}]], vim.log.levels.{log_level}, {{}})

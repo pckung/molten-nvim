@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from typing import Any, Dict, List, Optional, Tuple
@@ -818,6 +819,26 @@ class Molten:
                     json.dump(save(molten, buf.number), file)
                 break
         notify_info(self.nvim, f"Saved kernel `{kernel}` to: {path}")
+
+    @pynvim.function("MoltenSaveOutputs", sync=True)  # type: ignore
+    def function_save_outputs(self, args: List[str]) -> bool:
+        """Save the current buffer's outputs to args[0], quietly and without the kernel's name
+        (for remote kernels that's a URL with the server token). Used by `molten.remote`, which
+        supplies the kernel again when loading. Returns whether anything was saved."""
+        kernels = self.buffers.get(self.nvim.current.buffer.number)
+        if not kernels:
+            return False
+        path = args[0]
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        buf = self.nvim.current.buffer
+        data = save(kernels[0], buf.number)
+        data["kernel"] = ""
+        data["molten_remote_checksum"] = hashlib.sha256(
+            "\n".join(buf.api.get_lines(0, -1, True)).encode("utf-8")
+        ).hexdigest()
+        with open(path, "w") as file:
+            json.dump(data, file)
+        return True
 
     @pynvim.command("MoltenLoad", nargs="*", sync=True)  # type: ignore
     @nvimui  # type: ignore

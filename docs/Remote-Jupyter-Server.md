@@ -84,6 +84,7 @@ All options with their defaults are at the top of
 | `:MoltenRemoteDisconnect [host]` | Close the tunnel (all of them without an argument). A server molten started is stopped, together with its kernels. |
 | `:MoltenRemoteStatus` | List connections. |
 | `:MoltenRemoteLog {host}` | Show ssh and jupyter output for a connection, for when something doesn't work. |
+| `:MoltenRemoteSaveOutputs` | Save this file's outputs now (also happens on every write). |
 
 All the regular molten commands (`:MoltenEvaluateLine`, `:MoltenInterrupt`, `:MoltenRestart`, ...)
 then work as usual, including `input()`.
@@ -102,6 +103,27 @@ because Jupyter only sends it to the client that ran the cell.
 Kernels you no longer need can be shut down from JupyterLab, or with `keep_kernels = false` and
 `:MoltenDeinit`. To reattach, the tunnel must reach the *same* server, so this needs a server that
 outlives your neovim session (not `start_server = true`).
+
+## Saving outputs
+
+With `save_outputs = true` (the default), every time you write a file that uses a remote kernel,
+its cell outputs are saved to `stdpath("data")/molten-remote/` (without the server token). The next
+`:MoltenRemoteConnect` from that file shows them again, before you run anything, like opening a
+notebook. Combined with reattaching, you pick up exactly where you left off.
+
+The outputs are tied to the file's exact contents: if the file changed after the last write (edited
+in another program, `git pull`, ...), they aren't restored and you get a message saying so.
+`:MoltenRemoteSaveOutputs` saves without writing the file.
+
+To keep the outputs in a shareable form, export them into a notebook. For a `.qmd`:
+
+```bash
+quarto convert report.qmd        # creates report.ipynb with the same cells (once)
+```
+
+then `:MoltenExportOutput!` in Neovim writes the current outputs into `report.ipynb` (without the
+`!`, into a new `copy-of-report.ipynb`). `quarto render report.ipynb` turns it into HTML/PDF using
+those outputs, without running the code again. This needs `nbformat` in molten's Python environment.
 
 ## Without the Lua helper
 
