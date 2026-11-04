@@ -316,4 +316,73 @@ function M.toggle(ids, files, interval_ms, mode)
   return true
 end
 
+--- :MoltenSaveAnimation without a path: ask for one
+function M.ask_save_path(default)
+  vim.ui.input({
+    prompt = "Save the animation as (.gif .mp4 .html, or folder/): ",
+    default = vim.fn.fnamemodify(default, ":~"),
+    completion = "file",
+  }, function(path)
+    if path and path ~= "" then
+      vim.cmd("MoltenSaveAnimation " .. vim.fn.fnameescape(path))
+    end
+  end)
+end
+
+--- Assemble the frames (original resolution, written by :MoltenSaveAnimation into `tmpdir`)
+--- into a gif (ImageMagick) or a video (ffmpeg), in the background
+---@param files string[]
+---@param interval_ms number
+---@param target string
+---@param tmpdir string removed afterwards
+function M.save(files, interval_ms, target, tmpdir)
+  local ext = vim.fn.fnamemodify(target, ":e"):lower()
+  local fps = interval_ms > 0 and 1000 / interval_ms or 10
+  local cmd, missing
+  if ext == "gif" then
+    local im = vim.fn.executable("magick") == 1 and { "magick" } or vim.fn.executable("convert") == 1 and { "convert" }
+    if im then
+      -- -delay is in 1/100 s; loop forever; only store what changes between frames (smaller file)
+      cmd = vim.list_extend(vim.list_extend(im, { "-delay", tostring(math.max(1, math.floor(interval_ms / 10 + 0.5))), "-loop", "0" }), files)
+      vim.list_extend(cmd, { "-layers", "Optimize", target })
+    else
+      missing = "ImageMagick (brew install imagemagick)"
+    end
+  else
+    if vim.fn.executable("ffmpeg") == 1 then
+      local frame_ext = vim.fn.fnamemodify(files[1], ":e")
+      cmd = {
+        "ffmpeg", "-y", "-loglevel", "error", "-framerate", string.format("%.4f", fps),
+        "-i", tmpdir .. "/frame_%05d." .. frame_ext,
+        -- even width/height, needed by most video players
+        "-vf", "pad=ceil(iw/2)*2:ceil(ih/2)*2:color=white",
+      }
+      if ext == "webm" then
+        vim.list_extend(cmd, { "-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30" })
+      else
+        vim.list_extend(cmd, { "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18" })
+      end
+      table.insert(cmd, target)
+    else
+      missing = "ffmpeg (brew install ffmpeg); or save as .gif"
+    end
+  end
+  if not cmd then
+    vim.fn.delete(tmpdir, "rf")
+    vim.notify("[Molten] saving as ." .. ext .. " needs " .. missing, vim.log.levels.ERROR)
+    return
+  end
+  vim.notify(string.format("[Molten] saving %d frames to %s ...", #files, vim.fn.fnamemodify(target, ":~")))
+  vim.system(cmd, { text = true }, function(res)
+    vim.schedule(function()
+      vim.fn.delete(tmpdir, "rf")
+      if res.code == 0 then
+        vim.notify("[Molten] saved the animation to " .. vim.fn.fnamemodify(target, ":~"))
+      else
+        vim.notify("[Molten] couldn't save the animation:\n" .. (res.stderr or ""), vim.log.levels.ERROR)
+      end
+    end)
+  end)
+end
+
 return M

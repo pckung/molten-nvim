@@ -1212,6 +1212,82 @@ class Molten:
                     return
         notify_warn(self.nvim, "No animation in the output of the cell under the cursor")
 
+    @pynvim.command("MoltenSaveAnimation", nargs="?", sync=True, complete="file")  # type: ignore
+    @nvimui  # type: ignore
+    def command_save_animation(self, args: List[Any]) -> None:
+        """
+        Save the matplotlib animation in the output of the cell under the cursor, at its original
+        resolution: `.gif` (ImageMagick), `.mp4` / `.mov` / `.webm` / `.mkv` (ffmpeg), `.html`
+        (the original player, opens in a browser), or a folder (ends with `/`: one PNG per frame).
+        Without a path, asks for one.
+        """
+        kernels = self._get_current_buf_kernels(True)
+        assert kernels is not None
+        chunk = None
+        for kern in kernels:
+            cell = kern._get_selected_span()
+            if cell is None:
+                continue
+            for c in kern.outputs[cell].output.chunks:
+                if isinstance(c, AnimationOutputChunk):
+                    chunk = c
+                    break
+            if chunk is not None:
+                break
+        if chunk is None:
+            notify_warn(self.nvim, "No animation in the output of the cell under the cursor")
+            return
+        html = (chunk.jupyter_data or {}).get("text/html", "")
+        frames, interval = animation_frames_from_html(html)
+        if not frames:
+            notify_warn(self.nvim, "Couldn't find the animation's frames in the output")
+            return
+
+        if not args or not str(args[0]).strip():
+            name = self.nvim.funcs.expand("%:p:r") or os.path.join(os.getcwd(), "animation")
+            self.nvim.exec_lua(
+                "require('molten.animation').ask_save_path(...)", name + "_animation.gif"
+            )
+            return
+
+        raw = str(args[0]).strip()
+        is_dir = raw.endswith("/") or raw.endswith(os.sep)
+        target = self.nvim.funcs.fnamemodify(os.path.expanduser(raw), ":p")
+        ext = "" if is_dir else os.path.splitext(target)[1].lower().lstrip(".")
+        if not is_dir and ext not in ("gif", "mp4", "mov", "webm", "mkv", "html"):
+            notify_warn(
+                self.nvim,
+                f"Can't save as .{ext or '?'}: use .gif, .mp4, .mov, .webm, .mkv, .html, "
+                "or a folder ending in / (one PNG per frame)",
+            )
+            return
+        parent = target if is_dir else os.path.dirname(target)
+        os.makedirs(parent, exist_ok=True)
+
+        if ext == "html":
+            with open(target, "w", encoding="utf-8") as f:
+                f.write(f"<!doctype html>\n<html><head><meta charset='utf-8'></head><body>\n{html}\n</body></html>\n")
+            notify_info(self.nvim, f"Saved the animation to {target} (opens in a browser)")
+            return
+
+        import base64
+        import tempfile
+
+        folder = target if is_dir else tempfile.mkdtemp(prefix="molten-anim-")
+        files = []
+        for i, (fext, b64) in enumerate(frames, 1):
+            path = os.path.join(folder, f"frame_{i:05d}.{fext}")
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            files.append(path)
+        if is_dir:
+            notify_info(self.nvim, f"Saved {len(files)} frames to {folder}")
+            return
+        # assembling a gif / video takes a while: done in the background, a message says when
+        self.nvim.exec_lua(
+            "require('molten.animation').save(...)", files, interval, target, folder
+        )
+
     @pynvim.command("MoltenToggleExpandOutput", nargs="0", sync=True, bang=True)  # type: ignore
     @nvimui  # type: ignore
     def command_toggle_expand_output(self, args: List[Any], bang: bool) -> None:
