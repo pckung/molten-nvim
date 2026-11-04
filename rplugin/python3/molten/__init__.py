@@ -466,6 +466,78 @@ class Molten:
         target_pos = all_cells[(count - 1) % len(all_cells)].begin
         self.nvim.api.win_set_cursor(0, (target_pos.lineno + 1, target_pos.colno))
 
+    def _kernels_for_goto(self) -> List[MoltenKernel]:
+        """this buffer's kernels first, then every other kernel (a kernel can run cells from
+        several files)"""
+        self._initialize_if_necessary()
+        ordered: List[MoltenKernel] = list(self.buffers.get(self.nvim.current.buffer.number) or [])
+        for kernel in self.molten_kernels.values():
+            if kernel not in ordered:
+                ordered.append(kernel)
+        return ordered
+
+    def _jump_to_cell(self, cell: CodeCell) -> bool:
+        """Move the cursor to the cell's first line, in its file (switching to it if needed).
+        <C-o> jumps back."""
+        if not self.nvim.api.buf_is_valid(cell.bufno):
+            return False
+        target = None
+        for win in self.nvim.api.tabpage_list_wins(0):
+            if self.nvim.api.win_get_buf(win) == cell.bufno:
+                target = win
+                break
+        self.nvim.command("normal! m'")  # so <C-o> comes back here
+        if target is not None:
+            self.nvim.api.set_current_win(target)
+        else:
+            self.nvim.command(f"buffer {cell.bufno}")
+        line_count = self.nvim.api.buf_line_count(cell.bufno)
+        line = min(cell.begin.lineno + 1, line_count)
+        self.nvim.api.win_set_cursor(0, (line, 0))
+        self.nvim.command("normal! zz")
+        return True
+
+    @pynvim.command("MoltenGotoRunning", sync=True, nargs=0)  # type: ignore
+    @nvimui  # type: ignore
+    def command_goto_running(self) -> None:
+        """Jump to the cell that is running now (in any file). <C-o> jumps back."""
+        kernels = self._kernels_for_goto()
+        for kernel in kernels:
+            # molten reads kernel messages only for the buffer you're in: catch up first, so
+            # cells that finished while you were in another file don't count as running
+            for _ in range(kernel.queued_outputs.qsize() + 2):
+                kernel.tick()
+            cell = kernel.running_cell()
+            if cell is not None and self._jump_to_cell(cell):
+                return
+        last = self._last_run(kernels)
+        if last is not None:
+            notify_info(
+                self.nvim,
+                "Nothing is running. :MoltenGotoLastRun goes to the last cell run "
+                f"(line {last.begin.lineno + 1})",
+            )
+        else:
+            notify_info(self.nvim, "Nothing is running")
+
+    def _last_run(self, kernels: List[MoltenKernel]) -> Optional[CodeCell]:
+        best = None
+        best_time = None
+        for kernel in kernels:
+            if kernel.last_run is None or kernel.last_run_time is None:
+                continue
+            if best_time is None or kernel.last_run_time > best_time:
+                best, best_time = kernel.last_run, kernel.last_run_time
+        return best
+
+    @pynvim.command("MoltenGotoLastRun", sync=True, nargs=0)  # type: ignore
+    @nvimui  # type: ignore
+    def command_goto_last_run(self) -> None:
+        """Jump to the cell run most recently (in any file). <C-o> jumps back."""
+        last = self._last_run(self._kernels_for_goto())
+        if last is None or not self._jump_to_cell(last):
+            notify_info(self.nvim, "No cell has been run yet")
+
     @pynvim.command("MoltenPrev", sync=True, nargs="*")  # type: ignore
     @nvimui
     def command_prev(self, args: List[str]) -> None:

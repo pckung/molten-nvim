@@ -70,6 +70,9 @@ class MoltenKernel:
         self.queued_outputs = Queue()
 
         self.selected_cell = None
+        # the cell run most recently (`:MoltenGotoLastRun`), and when
+        self.last_run: Optional[CodeCell] = None
+        self.last_run_time: Optional[datetime] = None
         self.output_statuses = {}
         self.should_show_floating_win = False
         self.updating_interface = False
@@ -119,6 +122,8 @@ class MoltenKernel:
         self.queued_outputs.put(span)
 
         self.selected_cell = span
+        self.last_run = span
+        self.last_run_time = datetime.now()
 
         if not self.options.virt_text_output:
             self.should_show_floating_win = True
@@ -207,6 +212,22 @@ class MoltenKernel:
             subprocess.run([opencmd, filepath])
 
         return True
+
+    def running_cell(self) -> Optional[CodeCell]:
+        """The cell the kernel is running now, or the next one waiting to run (None when it's
+        idle). Molten reads the kernel's messages only for the buffer you're in, so while you're
+        in another file a finished cell can still count as running until you come back."""
+        cell = self.current_output
+        if (
+            cell is not None
+            and cell in self.outputs
+            and self.outputs[cell].output.status != OutputStatus.DONE
+        ):
+            return cell
+        for queued in list(self.queued_outputs.queue):
+            if queued in self.outputs and self.outputs[queued].output.status != OutputStatus.DONE:
+                return queued
+        return None
 
     def _check_if_done_running(self) -> None:
         # TODO: refactor

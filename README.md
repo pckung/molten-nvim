@@ -124,6 +124,8 @@ kernel is attached to the buffer. This is configurable with the `molten_auto_ini
 | `MoltenInit`              | `["shared"] [kernel]` | Initialize a kernel for the current buffer. If `shared` is passed as the first value, this buffer will use an already running kernel. If no kernel is given, prompts the user. |
 | `MoltenDeinit`            | none                  | De-initialize the current buffer's runtime and molten instance. (called automatically on vim close/buffer unload) |
 | `MoltenGoto`              | `[n]`                 | Go to the `n`th code cell `n` defaults to 1 (1 indexed) |
+| `MoltenGotoRunning`       | none                  | Go to the cell that is running now, or waiting to run (in any file). `<C-o>` jumps back |
+| `MoltenGotoLastRun`       | none                  | Go to the cell run most recently (in any file). `<C-o>` jumps back |
 | `MoltenNext`              | `[n]`                 | Go to the next code cell, or jump `n` code cells `n` defaults to 1. Values wrap. Negative values move backwards |
 | `MoltenPrev`              | `[n]`                 | like `Next` but backwards |
 | `MoltenEvaluateLine`      | `[kernel]`            | Evaluate the current line |
