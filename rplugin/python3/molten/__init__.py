@@ -1120,8 +1120,8 @@ class Molten:
                     if playing:
                         notify_info(
                             self.nvim,
-                            f"Playing {len(chunk.frames)} frames (the first loop is slower while "
-                            "frames load); run it again to stop",
+                            f"Loading {len(chunk.frames)} frames; it starts playing when they're all "
+                            "ready. Run it again to stop",
                         )
                     return
         notify_warn(self.nvim, "No animation in the output of the cell under the cursor")

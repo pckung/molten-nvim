@@ -69,7 +69,7 @@ function M.stop(key)
   players[key] = nil
   player.timer:stop()
   player.timer:close()
-  if ensure_sent(player.imgs[1]) then
+  if player.imgs[1] and ensure_sent(player.imgs[1]) then
     for _, pl in ipairs(placements(player.ids)) do
       show(pl, player.imgs[1]) -- back to the first frame
     end
@@ -106,16 +106,139 @@ function M.status()
       vis[#vis + 1] = (id:match("^virt%-") and "inline" or "window") .. "="
         .. (pl and (pl.closed and "closed" or ("open, showing image " .. pl.img.id)) or "none")
     end
-    table.insert(lines, string.format("%s: frame %d/%d [%s], %d/%d frame files on disk, timer %s, %s",
+    table.insert(lines, string.format("%s: frame %d/%d [%s], %d/%d frame files on disk, %s, %s",
       vim.fn.fnamemodify(key, ":t"), p.i, #p.imgs, table.concat(frames), readable, #p.imgs,
-      p.timer:is_active() and "running" or "stopped", table.concat(vis, ", ")))
+      p.loading and "loading" or (p.timer:is_active() and "playing" or "stopped"), table.concat(vis, ", ")))
   end
   local text = table.concat(lines, "\n")
   vim.notify(text)
   return text
 end
 
---- Start (or stop) playing. Returns true when it's now playing.
+--- ImageMagick command: { "magick", sub } (v7) or { sub } (v6), or nil
+local function magick(sub)
+  if vim.fn.executable("magick") == 1 then
+    return { "magick", sub }
+  elseif vim.fn.executable(sub) == 1 then
+    return { sub }
+  end
+end
+
+--- Lower the frames' resolution to `dpi`, in place, keeping their size on screen (snacks sizes
+--- images by pixels / dpi). Only shrinks; skips when ImageMagick or the frame's dpi is unknown.
+local function shrink(files, dpi, done)
+  local identify, mogrify = magick("identify"), magick("mogrify")
+  if not dpi or dpi <= 0 or not identify or not mogrify then
+    return done()
+  end
+  local out = {}
+  vim.fn.jobstart(vim.list_extend(identify, { "-format", "%x %U", files[1] }), {
+    stdout_buffered = true,
+    on_stdout = function(_, data) out = data end,
+    on_exit = function(_, code)
+      local x, units = (out[1] or ""):match("^([%d.]+)%s+(%S+)")
+      local current = tonumber(x)
+      if code ~= 0 or not current or current <= 0 or units == "Undefined" then
+        return done() -- no resolution stored in the image: leave it
+      end
+      if units == "PixelsPerCentimeter" then
+        current = current * 2.54
+      end
+      if current <= dpi + 0.5 then
+        return done() -- already at (or below) the target
+      end
+      local cmd = vim.list_extend(mogrify, { "-units", "PixelsPerInch", "-resample", tostring(dpi) })
+      vim.fn.jobstart(vim.list_extend(cmd, files), {
+        on_exit = function(_, rc)
+          if rc ~= 0 then
+            vim.notify("[Molten] couldn't lower the animation's resolution; playing it as is", vim.log.levels.WARN)
+          end
+          done()
+        end,
+      })
+    end,
+  })
+end
+
+local function play(key, player, interval_ms)
+  player.timer:start(
+    0,
+    math.max(math.floor(interval_ms), 30), -- ~33 fps at most
+    vim.schedule_wrap(function()
+      if players[key] ~= player then
+        return
+      end
+      local visible = placements(player.ids)
+      if #visible == 0 then
+        -- output hidden or being redrawn: wait for it, but give up if it's gone for good (~10 s)
+        player.missing = player.missing + 1
+        if player.missing * interval_ms > 10000 then
+          M.stop(key)
+        end
+        return
+      end
+      player.missing = 0
+      local imgs = player.imgs
+      local next_i = player.i % #imgs + 1
+      local img = imgs[next_i]
+      if img:failed() then
+        player.i = next_i -- skip a frame that couldn't be loaded
+        return
+      end
+      if not ensure_sent(img) then
+        return -- evicted and being sent again
+      end
+      player.i = next_i
+      for _, pl in ipairs(visible) do
+        show(pl, img)
+      end
+    end)
+  )
+end
+
+--- Load (convert + send to the terminal) every frame, then start playing. The output keeps showing
+--- the first frame until then.
+local function load_then_play(key, player, interval_ms)
+  local started = (vim.uv or vim.loop).now()
+  player.timer:start(
+    0,
+    100,
+    vim.schedule_wrap(function()
+      if players[key] ~= player then
+        return
+      end
+      local loaded, failed = 0, 0
+      for i, img in ipairs(player.imgs) do
+        if img:failed() then
+          failed = failed + 1
+        elseif player.sent_once[i] or ensure_sent(img) then
+          player.sent_once[i] = true -- may get evicted later; playback sends it again then
+          loaded = loaded + 1
+        end
+      end
+      if loaded + failed < #player.imgs then
+        if (vim.uv or vim.loop).now() - started > 120000 then
+          M.stop(key)
+          vim.notify("[Molten] the animation's frames took too long to load", vim.log.levels.ERROR)
+        end
+        return
+      end
+      player.timer:stop()
+      if loaded == 0 then
+        M.stop(key)
+        vim.notify("[Molten] couldn't load the animation's frames (" .. tostring(player.imgs[1].file) .. ")",
+          vim.log.levels.ERROR)
+        return
+      end
+      player.loading = false
+      vim.notify(string.format("[Molten] playing %d frames%s", loaded,
+        failed > 0 and (" (" .. failed .. " couldn't be loaded)") or ""))
+      play(key, player, interval_ms)
+    end)
+  )
+end
+
+--- Start (or stop) playing. Returns true when it's now loading/playing.
 ---@param ids string[] molten's identifiers for the image (inline "virt-<file>", window "<file>")
 ---@param files string[] frame image files, in order
 ---@param interval_ms number time per frame
@@ -130,52 +253,29 @@ function M.toggle(ids, files, interval_ms)
     return false
   end
 
-  local imgs = {}
-  for i, file in ipairs(files) do
-    imgs[i] = Snacks.image.image.new(file) -- converts and sends to the terminal in the background
-  end
-
-  local player = { ids = ids, imgs = imgs, i = 1, missing = 0, timer = assert((vim.uv or vim.loop).new_timer()) }
+  local player = {
+    ids = ids,
+    imgs = {},
+    i = 1,
+    missing = 0,
+    loading = true,
+    sent_once = {},
+    timer = assert((vim.uv or vim.loop).new_timer()),
+  }
   players[key] = player
-  player.timer:start(
-    0,
-    math.max(math.floor(interval_ms), 30), -- ~33 fps at most
-    vim.schedule_wrap(function()
+  -- lower resolution = smaller frames = faster to load and send, same size on screen
+  local dpi = tonumber(vim.g.molten_animation_dpi or 72)
+  shrink(files, dpi, function()
+    vim.schedule(function()
       if players[key] ~= player then
-        return
+        return -- stopped meanwhile
       end
-      local visible = placements(ids)
-      if #visible == 0 then
-        -- output hidden or being redrawn: wait for it, but give up if it's gone for good (~10 s)
-        player.missing = player.missing + 1
-        if player.missing * interval_ms > 10000 then
-          M.stop(key)
-        end
-        return
+      for i, file in ipairs(files) do
+        player.imgs[i] = Snacks.image.image.new(file) -- converts and sends in the background
       end
-      player.missing = 0
-      local next_i = player.i % #imgs + 1
-      local img = imgs[next_i]
-      if img:failed() then
-        player.i = next_i -- skip a frame that couldn't be loaded
-        player.failed = (player.failed or 0) + 1
-        if player.failed >= #imgs then
-          M.stop(key)
-          vim.notify("[Molten] couldn't load the animation's frames (" .. tostring(img.file) .. ")",
-            vim.log.levels.ERROR)
-        end
-        return
-      end
-      player.failed = 0
-      if not ensure_sent(img) then
-        return -- still loading: hold the current frame (only during the first loop)
-      end
-      player.i = next_i
-      for _, pl in ipairs(visible) do
-        show(pl, img)
-      end
+      load_then_play(key, player, interval_ms)
     end)
-  )
+  end)
   return true
 end
 
