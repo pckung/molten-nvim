@@ -14,7 +14,7 @@ from molten.save_load import MoltenIOError, get_default_save_file, load, save
 from molten.moltenbuffer import MoltenKernel
 from molten.options import MoltenOptions
 from molten.outputbuffer import OutputBuffer
-from molten.outputchunks import AnimationOutputChunk
+from molten.outputchunks import AnimationOutputChunk, animation_frames_from_html
 from molten.position import DynamicPosition, Position
 from molten.runtime import get_available_kernels
 from molten.utils import MoltenException, notify_error, notify_info, notify_warn, nvimui
@@ -1094,6 +1094,22 @@ class Molten:
                     if not chunk.img_identifier:
                         notify_warn(self.nvim, "Show the output first (it's hidden)")
                         return
+                    if not all(os.path.exists(f) for f in chunk.frames):
+                        # molten's temporary files are removed when a kernel is shut down for a
+                        # buffer; the frames are still in the output, so write them again
+                        html = (chunk.jupyter_data or {}).get("text/html", "")
+                        frames, _ = animation_frames_from_html(html)
+                        if not frames:
+                            notify_warn(self.nvim, "The animation's frames are gone; run the cell again")
+                            return
+                        import base64
+
+                        paths = []
+                        for ext, b64 in frames:
+                            with kern.runtime._alloc_file(ext, "wb") as (path, file):
+                                file.write(base64.b64decode(b64))  # type: ignore
+                            paths.append(path)
+                        chunk.frames = paths
                     playing = self.nvim.exec_lua(
                         "return require('molten.animation').toggle(...)",
                         # the inline copy and the output window's copy (see ImageOutputChunk.place)

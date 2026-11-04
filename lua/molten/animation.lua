@@ -82,6 +82,39 @@ function M.stop_all()
   end
 end
 
+--- What the players are doing, for troubleshooting: `:lua require("molten.animation").status()`
+function M.status()
+  local env = Snacks and Snacks.image and Snacks.image.terminal.env() or {}
+  local lines = {
+    string.format("terminal: %s | placeholders: %s | nvim %s", tostring(env.name), tostring(env.placeholders),
+      tostring(vim.version())),
+  }
+  if not next(players) then
+    table.insert(lines, "no animation is playing")
+  end
+  for key, p in pairs(players) do
+    local frames, readable = {}, 0
+    for _, img in ipairs(p.imgs) do
+      -- S = in the terminal, r = loaded but not sent, . = loading, F = failed
+      frames[#frames + 1] = img:failed() and "F" or img:ready() and (img.sent and "S" or "r") or "."
+      readable = readable + (vim.fn.filereadable(img.src) == 1 and 1 or 0)
+    end
+    local vis = {}
+    for _, id in ipairs(p.ids) do
+      local api = require("load_snacks_nvim").snacks_api
+      local pl = api.get_placement(id)
+      vis[#vis + 1] = (id:match("^virt%-") and "inline" or "window") .. "="
+        .. (pl and (pl.closed and "closed" or ("open, showing image " .. pl.img.id)) or "none")
+    end
+    table.insert(lines, string.format("%s: frame %d/%d [%s], %d/%d frame files on disk, timer %s, %s",
+      vim.fn.fnamemodify(key, ":t"), p.i, #p.imgs, table.concat(frames), readable, #p.imgs,
+      p.timer:is_active() and "running" or "stopped", table.concat(vis, ", ")))
+  end
+  local text = table.concat(lines, "\n")
+  vim.notify(text)
+  return text
+end
+
 --- Start (or stop) playing. Returns true when it's now playing.
 ---@param ids string[] molten's identifiers for the image (inline "virt-<file>", window "<file>")
 ---@param files string[] frame image files, in order
@@ -125,8 +158,15 @@ function M.toggle(ids, files, interval_ms)
       local img = imgs[next_i]
       if img:failed() then
         player.i = next_i -- skip a frame that couldn't be loaded
+        player.failed = (player.failed or 0) + 1
+        if player.failed >= #imgs then
+          M.stop(key)
+          vim.notify("[Molten] couldn't load the animation's frames (" .. tostring(img.file) .. ")",
+            vim.log.levels.ERROR)
+        end
         return
       end
+      player.failed = 0
       if not ensure_sent(img) then
         return -- still loading: hold the current frame (only during the first loop)
       end
