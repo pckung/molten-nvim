@@ -20,12 +20,22 @@ def is_object_repr(text: str) -> bool:
     return _OBJECT_REPR.fullmatch(text.strip()) is not None
 
 
+def plain_is_uninformative(plain: object, html: str) -> bool:
+    """Whether the HTML table says more than the plain text of the same output: there's no plain
+    text, it's just "<... object at 0x...>", or it's a one-line summary (e.g. dask's
+    "dask.array<..., shape=(4000, 3000), ...>") while the HTML has a table."""
+    if not isinstance(plain, str) or not plain.strip() or is_object_repr(plain):
+        return True
+    return "\n" not in plain.strip() and "<table" in html.lower()
+
+
 class _Cell:
     def __init__(self, header: bool, colspan: int, rowspan: int):
         self.header = header
         self.colspan = colspan
         self.rowspan = rowspan
         self.parts: List[str] = []
+        self.has_table = False  # a nested table was inside this cell
 
     @property
     def text(self) -> str:
@@ -37,42 +47,56 @@ class _Table:
         self.caption: List[str] = []
         self.rows: List[List[_Cell]] = []
         self.head_rows = 0  # number of rows that came from <thead>
+        self.cell: Optional[_Cell] = None  # the cell being read
+        self.in_thead = False
+        self.in_caption = False
+        self.order = 0
+
+    def is_layout(self) -> bool:
+        """Only there to arrange other tables (and pictures) side by side: nothing to show."""
+        cells = [c for row in self.rows for c in row]
+        return any(c.has_table for c in cells) and not any(
+            c.text for c in cells if not c.has_table
+        )
 
 
 class _TableParser(HTMLParser):
+    """Collects every table, nested ones included (a nested table becomes a table of its own)."""
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.tables: List[_Table] = []
-        self._stack: List[_Table] = []  # nested tables: the inner one's text goes in its cell
-        self._cell: Optional[_Cell] = None
-        self._in_thead = False
-        self._in_caption = False
-        self._skip = 0  # inside <style> / <script>
-        self._nested = 0  # inside a table that is itself inside a cell
+        self._stack: List[_Table] = []
+        self._skip = 0  # inside <style>, <script> or <svg>: not text
+        self._opened = 0
 
     def handle_starttag(self, tag: str, attrs: List[Tuple[str, Optional[str]]]) -> None:
-        if tag in ("style", "script"):
+        if tag in ("style", "script", "svg"):
             self._skip += 1
-        elif self._nested:
-            if tag == "table":
-                self._nested += 1
-        elif tag == "table":
-            if self._stack and self._cell is not None:
-                self._nested = 1  # nested table: its text goes into the outer cell
-                return
-            table = _Table()
-            self._stack.append(table)
-        elif not self._stack:
             return
-        elif tag == "thead":
-            self._in_thead = True
+        if self._skip:
+            return
+        if tag == "table":
+            if self._stack and self._stack[-1].cell is not None:
+                self._stack[-1].cell.has_table = True
+            table = _Table()
+            table.order = self._opened  # keep tables in page order, not closing order
+            self._opened += 1
+            self._stack.append(table)
+            return
+        if not self._stack:
+            return
+        table = self._stack[-1]
+        if tag == "thead":
+            table.in_thead = True
         elif tag == "caption":
-            self._in_caption = True
-        elif tag == "tr" and self._cell is None:
-            self._stack[-1].rows.append([])
-            if self._in_thead:
-                self._stack[-1].head_rows += 1
-        elif tag in ("td", "th") and self._cell is None:
+            table.in_caption = True
+        elif tag == "tr":
+            table.cell = None
+            table.rows.append([])
+            if table.in_thead:
+                table.head_rows += 1
+        elif tag in ("td", "th"):
             a = dict(attrs)
 
             def span(name: str) -> int:
@@ -81,39 +105,39 @@ class _TableParser(HTMLParser):
                 except ValueError:
                     return 1
 
-            if not self._stack[-1].rows:
-                self._stack[-1].rows.append([])
-            self._cell = _Cell(tag == "th", span("colspan"), span("rowspan"))
-            self._stack[-1].rows[-1].append(self._cell)
-        elif tag == "br" and self._cell is not None:
-            self._cell.parts.append(" ")
+            if not table.rows:
+                table.rows.append([])
+            table.cell = _Cell(tag == "th", span("colspan"), span("rowspan"))
+            table.rows[-1].append(table.cell)
+        elif tag == "br" and table.cell is not None:
+            table.cell.parts.append(" ")
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in ("style", "script"):
+        if tag in ("style", "script", "svg"):
             self._skip = max(0, self._skip - 1)
-        elif self._nested:
-            if tag == "table":
-                self._nested -= 1
-            elif tag in ("td", "th") and self._cell is not None:
-                self._cell.parts.append(" ")
-        elif not self._stack:
             return
-        elif tag in ("td", "th"):
-            self._cell = None
+        if self._skip or not self._stack:
+            return
+        table = self._stack[-1]
+        if tag in ("td", "th"):
+            table.cell = None
         elif tag == "thead":
-            self._in_thead = False
+            table.in_thead = False
         elif tag == "caption":
-            self._in_caption = False
-        elif tag == "table" and self._cell is None:
-            self.tables.append(self._stack.pop())
+            table.in_caption = False
+        elif tag == "table":
+            self._stack.pop()
+            if not table.is_layout():
+                self.tables.append(table)
 
     def handle_data(self, data: str) -> None:
         if self._skip or not self._stack:
             return
-        if self._cell is not None:
-            self._cell.parts.append(data)
-        elif self._in_caption:
-            self._stack[-1].caption.append(data)
+        table = self._stack[-1]
+        if table.cell is not None:
+            table.cell.parts.append(data)
+        elif table.in_caption:
+            table.caption.append(data)
 
 
 def _width(text: str) -> int:
@@ -167,7 +191,7 @@ def html_tables_to_text(html: str, max_cell_width: int = 40) -> Optional[str]:
         parser.close()
     except Exception:
         return None
-    tables = [t for t in parser.tables if any(t.rows)]
+    tables = sorted((t for t in parser.tables if any(t.rows)), key=lambda t: t.order)
     if not tables:
         return None
 
@@ -177,6 +201,11 @@ def html_tables_to_text(html: str, max_cell_width: int = 40) -> Optional[str]:
         if not grid or not grid[0]:
             continue
         cells = [[(_clip(text, max_cell_width), header) for text, header in row] for row in grid]
+        # drop columns that are empty everywhere (e.g. where a nested table or a picture was)
+        keep = [c for c in range(len(cells[0])) if any(row[c][0] for row in cells)]
+        if not keep:
+            continue
+        cells = [[row[c] for c in keep] for row in cells]
         ncols = len(cells[0])
         widths = [max(_width(row[c][0]) for row in cells) for c in range(ncols)]
         numeric = [
@@ -201,6 +230,6 @@ def html_tables_to_text(html: str, max_cell_width: int = 40) -> Optional[str]:
                 parts.append(pad + text if numeric[c] and i >= head else text + pad)
             lines.append("  ".join(parts).rstrip())
             if i == head - 1 and head < len(cells):
-                lines.append("  ".join("─" * w for w in widths))
+                lines.append("  ".join("─" * w for w in widths).rstrip())
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks) if blocks else None

@@ -16,7 +16,7 @@ from datetime import datetime
 from pynvim import Nvim
 
 
-from molten.html_table import html_tables_to_text, is_object_repr
+from molten.html_table import html_tables_to_text, plain_is_uninformative
 from molten.images import Canvas
 from molten.options import MoltenOptions
 from molten.utils import notify_error
@@ -322,9 +322,7 @@ def to_outputchunk(
         # "<... object at 0x...>"; render them as text instead
         mode = getattr(options, "html_table_output", "auto")
         plain = data.get("text/plain")
-        if mode == "always" or (
-            mode == "auto" and (not isinstance(plain, str) or not plain.strip() or is_object_repr(plain))
-        ):
+        if mode == "always" or (mode == "auto" and plain_is_uninformative(plain, data["text/html"])):
             text = html_tables_to_text(data["text/html"])
             if text:
                 chunk = _from_plaintext(text)
