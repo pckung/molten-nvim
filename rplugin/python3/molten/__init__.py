@@ -1065,24 +1065,31 @@ class Molten:
                 outbuf.toggle_virtual_output(cell.end)
                 return
 
-    @pynvim.command("MoltenToggleAnimation", nargs="0", sync=True, bang=True)  # type: ignore
+    @pynvim.command("MoltenToggleAnimation", nargs="?", sync=True, bang=True)  # type: ignore
     @nvimui  # type: ignore
     def command_toggle_animation(self, args: List[Any], bang: bool) -> None:
         """
         Play / stop the matplotlib animation (`anim.to_jshtml()`) in the output of the cell under
-        the cursor, in place. With a bang, stop every animation that is playing.
-        Needs `molten_image_provider = "snacks.nvim"`.
+        the cursor. `:MoltenToggleAnimation` plays it in place (needs
+        `molten_image_provider = "snacks.nvim"`); `:MoltenToggleAnimation text` plays it as
+        coloured text in a pop-up window (any terminal; needs ImageMagick). Without an argument,
+        `g:molten_animation_mode` ("image" or "text") decides. With a bang, stop every animation
+        that is playing.
         """
         if bang:
             self.nvim.exec_lua("require('molten.animation').stop_all()")
             return
+        mode = (args[0] if args else None) or self.nvim.vars.get("molten_animation_mode") or "image"
+        if mode not in ("image", "text"):
+            notify_warn(self.nvim, f"Unknown animation mode {mode!r}: use image or text")
+            return
         kernels = self._get_current_buf_kernels(True)
         assert kernels is not None
-        if self.options.image_provider != "snacks.nvim":
+        if mode == "image" and self.options.image_provider != "snacks.nvim":
             notify_warn(
                 self.nvim,
-                "Playing animations needs molten_image_provider = \"snacks.nvim\"; "
-                "use :MoltenOpenInBrowser to watch it in the browser",
+                "Playing animations in place needs molten_image_provider = \"snacks.nvim\"; "
+                "use :MoltenToggleAnimation text to play it as text",
             )
             return
         for kern in kernels:
@@ -1091,7 +1098,7 @@ class Molten:
                 continue
             for chunk in kern.outputs[cell].output.chunks:
                 if isinstance(chunk, AnimationOutputChunk):
-                    if not chunk.img_identifier:
+                    if mode == "image" and not chunk.img_identifier:
                         notify_warn(self.nvim, "Show the output first (it's hidden)")
                         return
                     if not all(os.path.exists(f) for f in chunk.frames):
@@ -1116,12 +1123,19 @@ class Molten:
                         ["virt-" + chunk.img_path, chunk.img_path],
                         chunk.frames,
                         chunk.interval_ms,
+                        mode,
                     )
-                    if playing:
+                    if playing and mode == "image":
                         notify_info(
                             self.nvim,
                             f"Loading {len(chunk.frames)} frames; it starts playing when they're all "
                             "ready. Run it again to stop",
+                        )
+                    elif playing:
+                        notify_info(
+                            self.nvim,
+                            f"Converting {len(chunk.frames)} frames to text; a window opens when "
+                            "they're ready. Run it again (or q in the window) to stop",
                         )
                     return
         notify_warn(self.nvim, "No animation in the output of the cell under the cursor")

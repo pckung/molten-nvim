@@ -60,6 +60,18 @@ local function ensure_sent(img)
   return img.sent == true
 end
 
+--- remove a frame from the terminal (image data and placements). Terminals keep a limited amount
+--- of image data (Ghostty: 320 MB per screen) and, when it's full, drop older images, including
+--- the frames of the animation that is playing: that showed as an empty output with an occasional
+--- flash. snacks.nvim sends it again if it's ever shown again.
+local function forget(img)
+  if img.sent then
+    pcall(Snacks.image.terminal.request, { a = "d", d = "I", i = img.id })
+    img.sent = false
+  end
+  img.placements = {}
+end
+
 ---@param key string the first frame's file
 function M.stop(key)
   local player = players[key]
@@ -69,9 +81,16 @@ function M.stop(key)
   players[key] = nil
   player.timer:stop()
   player.timer:close()
-  if player.imgs[1] and ensure_sent(player.imgs[1]) then
+  local first = player.imgs[1]
+  if first and ensure_sent(first) then
     for _, pl in ipairs(placements(player.ids)) do
-      show(pl, player.imgs[1]) -- back to the first frame
+      show(pl, first) -- back to the first frame
+    end
+  end
+  -- the other frames aren't shown anymore: free the terminal's memory for them
+  for i = 2, #player.imgs do
+    if player.imgs[i] ~= first then
+      forget(player.imgs[i])
     end
   end
 end
@@ -80,6 +99,7 @@ function M.stop_all()
   for key in pairs(players) do
     M.stop(key)
   end
+  require("molten.animation_text").stop_all()
 end
 
 --- What the players are doing, for troubleshooting: `:lua require("molten.animation").status()`
@@ -124,19 +144,21 @@ local function magick(sub)
   end
 end
 
---- Lower the frames' resolution to `dpi`, in place, keeping their size on screen (snacks sizes
---- images by pixels / dpi). Only shrinks; skips when ImageMagick or the frame's dpi is unknown.
-local function shrink(files, dpi, done)
+--- Lower the frames' resolution, in place, keeping their size on screen (snacks sizes images by
+--- pixels / dpi): to `dpi`, and further when all frames together would take more than `budget_mb`
+--- of the terminal's image memory (it stores them decoded, 4 bytes per pixel). Only shrinks;
+--- skips when ImageMagick or the frame's dpi is unknown.
+local function shrink(files, dpi, budget_mb, done)
   local identify, mogrify = magick("identify"), magick("mogrify")
-  if not dpi or dpi <= 0 or not identify or not mogrify then
+  if not identify or not mogrify then
     return done()
   end
   local out = {}
-  vim.fn.jobstart(vim.list_extend(identify, { "-format", "%x %U", files[1] }), {
+  vim.fn.jobstart(vim.list_extend(identify, { "-format", "%x %U %w %h", files[1] }), {
     stdout_buffered = true,
     on_stdout = function(_, data) out = data end,
     on_exit = function(_, code)
-      local x, units = (out[1] or ""):match("^([%d.]+)%s+(%S+)")
+      local x, units, w, h = (out[1] or ""):match("^([%d.]+)%s+(%S+)%s+(%d+)%s+(%d+)")
       local current = tonumber(x)
       if code ~= 0 or not current or current <= 0 or units == "Undefined" then
         return done() -- no resolution stored in the image: leave it
@@ -144,10 +166,17 @@ local function shrink(files, dpi, done)
       if units == "PixelsPerCentimeter" then
         current = current * 2.54
       end
-      if current <= dpi + 0.5 then
-        return done() -- already at (or below) the target
+      local target = (dpi and dpi > 0) and math.min(dpi, current) or current
+      local bytes = tonumber(w) * tonumber(h) * 4 * #files * (target / current) ^ 2
+      local budget = (budget_mb or 150) * 1024 * 1024
+      if bytes > budget then
+        target = target * math.sqrt(budget / bytes)
       end
-      local cmd = vim.list_extend(mogrify, { "-units", "PixelsPerInch", "-resample", tostring(dpi) })
+      target = math.max(math.floor(target), 12)
+      if target >= current - 0.5 then
+        return done() -- already small enough
+      end
+      local cmd = vim.list_extend(mogrify, { "-units", "PixelsPerInch", "-resample", tostring(target) })
       vim.fn.jobstart(vim.list_extend(cmd, files), {
         on_exit = function(_, rc)
           if rc ~= 0 then
@@ -242,11 +271,19 @@ end
 ---@param ids string[] molten's identifiers for the image (inline "virt-<file>", window "<file>")
 ---@param files string[] frame image files, in order
 ---@param interval_ms number time per frame
-function M.toggle(ids, files, interval_ms)
+---@param mode? "image"|"text" image: in place, in the output (snacks.nvim); text: coloured
+---  text characters in a pop-up window (works in any terminal). Default: vim.g.molten_animation_mode
+function M.toggle(ids, files, interval_ms, mode)
   local key = files[1]
-  if players[key] then
+  local text = require("molten.animation_text")
+  if players[key] or text.playing(key) then
     M.stop(key)
+    text.stop(key)
     return false
+  end
+  mode = mode or vim.g.molten_animation_mode or "image"
+  if mode == "text" then
+    return text.start(key, files, interval_ms)
   end
   if not (Snacks and Snacks.image) then
     vim.notify("[Molten] playing animations needs snacks.nvim", vim.log.levels.WARN)
@@ -265,7 +302,7 @@ function M.toggle(ids, files, interval_ms)
   players[key] = player
   -- lower resolution = smaller frames = faster to load and send, same size on screen
   local dpi = tonumber(vim.g.molten_animation_dpi or 72)
-  shrink(files, dpi, function()
+  shrink(files, dpi, tonumber(vim.g.molten_animation_max_mb or 150), function()
     vim.schedule(function()
       if players[key] ~= player then
         return -- stopped meanwhile
