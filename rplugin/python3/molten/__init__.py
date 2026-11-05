@@ -994,6 +994,11 @@ class Molten:
         else:
             path = get_default_save_file(self.options, self.nvim.current.buffer)
 
+        if not os.path.exists(path):
+            raise MoltenException(
+                f"No saved outputs at {path} (that file is written by :MoltenSave). Outputs saved on :w "
+                "for a remote kernel come back when you connect: :MoltenRemoteConnect / :MoltenRemoteAttach"
+            )
         with open(path) as file:
             data = json.load(file)
 
