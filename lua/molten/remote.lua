@@ -564,9 +564,12 @@ local function restore_outputs(buf, url)
   data.kernel = url
   local tmp = vim.fn.tempname() .. ".json" -- no spaces: :MoltenLoad splits its arguments
   vim.fn.writefile({ vim.json.encode(data) }, tmp)
-  pcall(vim.cmd, "MoltenLoad " .. tmp)
+  local ok, err = pcall(vim.cmd, "MoltenLoad " .. tmp)
   vim.fn.delete(tmp)
-  local restored = #vim.fn.MoltenRunningKernels(true) > 0
+  if not ok then
+    notify("couldn't restore the outputs: " .. tostring(err), vim.log.levels.WARN)
+  end
+  local restored = ok and #vim.fn.MoltenRunningKernels(true) > 0
   if restored then
     notify(string.format("restored the outputs of %d cell(s)", #(data.cells or {})))
   end

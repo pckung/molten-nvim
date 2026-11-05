@@ -196,6 +196,11 @@ class Molten:
         kernels = list(self.buffers.get(buffer.number) or [])
         if not kernels:
             return
+        what = ", ".join(
+            k.kernel_id + (" (still running on the server)" if self._server_kernel_id(k)
+                           else " (still used by other files)" if len(k.buffers) > 1 else " (stopped)")
+            for k in kernels
+        )
         self._clear_interface(kernels)
         for kernel in kernels:
             if len(kernel.buffers) > 1:  # other files still use it
@@ -207,11 +212,7 @@ class Molten:
             kernel.deinit()
             self.molten_kernels.pop(kernel.kernel_id, None)
         self.buffers.pop(buffer.number, None)
-        notify_info(
-            self.nvim,
-            "Disconnected this file from " + ", ".join(k.kernel_id for k in kernels)
-            + " (still running on the server)" * any(self._server_kernel_id(k) for k in kernels),
-        )
+        notify_info(self.nvim, "Disconnected this file from " + what)
 
     def _initialize_buffer(self, kernel_name: str, shared=False) -> MoltenKernel | None:
         assert self.canvas is not None
@@ -993,13 +994,19 @@ class Molten:
         else:
             path = get_default_save_file(self.options, self.nvim.current.buffer)
 
-        if self.nvim.current.buffer.number in self.buffers:
+        with open(path) as file:
+            data = json.load(file)
+
+        kernel = data.get("kernel") if isinstance(data, dict) else None
+        remote = isinstance(kernel, str) and kernel.startswith(("http://", "https://"))
+        existing = list(self.buffers.get(self.nvim.current.buffer.number) or [])
+        if existing and not remote:
             raise MoltenException(
                 "Molten is already initialized for this buffer; MoltenLoad initializes Molten."
             )
-
-        with open(path) as file:
-            data = json.load(file)
+        # remote kernel (molten.remote reconnecting a file): _initialize_buffer replaces the
+        # kernel(s) this file has, or keeps it if it's the same one. Refusing here left the file on
+        # its old kernel without its outputs when attaching to another kernel.
 
         molten = None
 
@@ -1014,6 +1021,8 @@ class Molten:
             kernel_name = data["kernel"]
 
             molten = self._initialize_buffer(kernel_name, shared=shared)
+            if molten and molten in existing:
+                return  # already connected to this kernel: its outputs are already shown
             if molten:
                 load(self.nvim, molten, self.nvim.current.buffer, data)
 
