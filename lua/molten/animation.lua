@@ -96,6 +96,9 @@ function M.stop(key)
     if vim.api.nvim_win_is_valid(pop.win) then
       pcall(vim.api.nvim_win_close, pop.win, true)
     end
+    for img, info in pairs(player.restore_info or {}) do
+      img.info = info[1] -- the size it had before the pop-up enlarged it
+    end
   elseif first and ensure_sent(first) then
     for _, pl in ipairs(placements(player)) do
       show(pl, first) -- back to the first frame
@@ -292,11 +295,64 @@ end
 
 --- the pop-up window: centred, sized to the animation, the cursor moves into it.
 --- q / <Esc> close it (and stop), <Space> pauses / resumes.
+--- the pop-up's largest size: g:molten_animation_popup_size (default 0.9) of the editor
+local function popup_max()
+  local frac = tonumber(vim.g.molten_animation_popup_size) or 0.9
+  frac = math.max(0.2, math.min(frac, 1))
+  return math.max(20, math.floor(vim.o.columns * frac) - 2), math.max(5, math.floor(vim.o.lines * frac) - 3)
+end
+
+--- size (cells) of an image scaled up or down to fill width x height, keeping its shape
+local function fill(file, info, width, height)
+  local ok, natural = pcall(Snacks.image.util.fit, file, { width = 100000, height = 100000 }, { info = info })
+  if not ok or not natural or natural.width <= 0 or natural.height <= 0 then
+    return nil
+  end
+  local s = math.min(width / natural.width, height / natural.height)
+  return {
+    width = math.max(1, math.floor(natural.width * s + 0.5)),
+    height = math.max(1, math.floor(natural.height * s + 0.5)),
+    scale = s,
+  }
+end
+
+--- snacks.nvim never shows an image larger than its natural size (pixels / dpi), which is small
+--- for a matplotlib figure. Enlarge the frames for the pop-up by lowering the dpi snacks uses
+--- for them (the same pixels are sent to the terminal, just drawn over more cells).
+local function enlarge(player, width, height)
+  local first = player.imgs[1]
+  local size = fill(first.file, first.info, width, height)
+  if not size or size.scale <= 1.01 then
+    return
+  end
+  local term = Snacks.image.terminal.size()
+  player.restore_info = player.restore_info or {}
+  for _, img in ipairs(player.imgs) do
+    if img.file and not img:failed() then
+      -- snacks shares an image object per file: put its info back when the pop-up closes
+      player.restore_info[img] = player.restore_info[img] or { img.info }
+      local info = vim.deepcopy(player.restore_info[img][1])
+      if not (info and info.size) then
+        local ok, dim = pcall(Snacks.image.util.dim, img.file)
+        info = ok and dim and { size = dim } or nil
+      end
+      if info then
+        -- without a dpi, snacks counts 1 pixel per screen pixel (96 dpi x the screen's scale)
+        local dpi = info.dpi or { width = 96 * term.scale, height = 96 * term.scale }
+        info.dpi = { width = dpi.width / size.scale, height = dpi.height / size.scale }
+        img.info = info
+      end
+    end
+  end
+end
+
+--- the pop-up window: centred, as large as the animation fits in (g:molten_animation_popup_size),
+--- the cursor moves into it. q / <Esc> close it (and stop), <Space> pauses / resumes.
 local function open_popup(key, player, files)
-  local maxw, maxh = math.floor(vim.o.columns * 0.85), math.floor(vim.o.lines * 0.85) - 2
-  local ok, size = pcall(Snacks.image.util.fit, files[1], { width = maxw, height = maxh })
-  local w = math.max(math.min(ok and size.width or 60, maxw), 34)
-  local h = math.max(math.min(ok and size.height or 20, maxh), 3)
+  local maxw, maxh = popup_max()
+  local size = fill(files[1], nil, maxw, maxh)
+  local w = math.max(math.min(size and size.width or 60, maxw), 34)
+  local h = math.max(math.min(size and size.height or 20, maxh), 3)
   local buf = vim.api.nvim_create_buf(false, true)
   vim.bo[buf].bufhidden = "wipe"
   vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "", string.format("  Loading %d frames…", #files) })
@@ -332,10 +388,14 @@ end
 function M._popup_image(player)
   local pop = player.popup
   vim.api.nvim_buf_set_lines(pop.buf, 0, -1, false, { "" })
+  local maxw, maxh = popup_max()
+  enlarge(player, maxw, maxh)
   local opts = Snacks.config.merge({}, Snacks.image.config.doc, {
     inline = false,
-    max_width = pop.width,
-    max_height = pop.height,
+    width = maxw,
+    height = maxh,
+    max_width = maxw,
+    max_height = maxh,
     on_update_pre = function(pl)
       -- fit the window to the image once its size is known
       local loc = pl:state().loc
@@ -426,7 +486,8 @@ end
 ---@param interval_ms number
 ---@param target string
 ---@param tmpdir string removed afterwards
-function M.save(files, interval_ms, target, tmpdir)
+---@param on_done? fun(ok: boolean) instead of the "saved" message (used by molten.video)
+function M.save(files, interval_ms, target, tmpdir, on_done)
   local ext = vim.fn.fnamemodify(target, ":e"):lower()
   local fps = interval_ms > 0 and 1000 / interval_ms or 10
   local cmd, missing
@@ -460,17 +521,29 @@ function M.save(files, interval_ms, target, tmpdir)
   end
   if not cmd then
     vim.fn.delete(tmpdir, "rf")
-    vim.notify("[Molten] saving as ." .. ext .. " needs " .. missing, vim.log.levels.ERROR)
+    vim.notify("[Molten] " .. (on_done and "making a video" or ("saving as ." .. ext)) .. " needs " .. missing,
+      vim.log.levels.ERROR)
+    if on_done then
+      on_done(false)
+    end
     return
   end
-  vim.notify(string.format("[Molten] saving %d frames to %s ...", #files, vim.fn.fnamemodify(target, ":~")))
+  if on_done then
+    vim.notify(string.format("[Molten] making a video of %d frames ...", #files))
+  else
+    vim.notify(string.format("[Molten] saving %d frames to %s ...", #files, vim.fn.fnamemodify(target, ":~")))
+  end
   vim.system(cmd, { text = true }, function(res)
     vim.schedule(function()
       vim.fn.delete(tmpdir, "rf")
-      if res.code == 0 then
+      if res.code ~= 0 then
+        vim.notify("[Molten] couldn't " .. (on_done and "make the video" or "save the animation") .. ":\n"
+          .. (res.stderr or ""), vim.log.levels.ERROR)
+      elseif not on_done then
         vim.notify("[Molten] saved the animation to " .. vim.fn.fnamemodify(target, ":~"))
-      else
-        vim.notify("[Molten] couldn't save the animation:\n" .. (res.stderr or ""), vim.log.levels.ERROR)
+      end
+      if on_done then
+        on_done(res.code == 0)
       end
     end)
   end)

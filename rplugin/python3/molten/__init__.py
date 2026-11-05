@@ -1377,6 +1377,74 @@ class Molten:
             "require('molten.animation').save(...)", files, interval, target, folder
         )
 
+    @pynvim.command("MoltenOpenVideo", nargs="0", sync=True, bang=True)  # type: ignore
+    @nvimui  # type: ignore
+    def command_open_video(self, _args: List[Any], bang: bool) -> None:
+        """
+        Play the matplotlib animation in the output of the cell under the cursor as a video, in
+        a video player outside Neovim (`g:molten_video_player`). Run it again to close the player.
+        The video is kept in one file (`g:molten_video_file`): on a cell without an animation it
+        opens the last one again; another cell's animation replaces it and reloads the player.
+        With a bang, close the player.
+        """
+        state = self.nvim.exec_lua("return require('molten.video').state()")
+        if bang:
+            self.nvim.exec_lua("require('molten.video').close()")
+            return
+
+        chunk = None
+        kernels = self._get_current_buf_kernels(False) or []
+        for kern in kernels:
+            cell = kern._get_selected_span()
+            if cell is None or cell not in kern.outputs:
+                continue
+            for c in kern.outputs[cell].output.chunks:
+                if isinstance(c, AnimationOutputChunk):
+                    chunk = c
+                    break
+            if chunk is not None:
+                break
+
+        if chunk is None:
+            # no animation here: close the player, or open the remembered video again
+            if state.get("open"):
+                self.nvim.exec_lua("require('molten.video').close()")
+            elif state.get("exists"):
+                self.nvim.exec_lua("require('molten.video').open(...)", state.get("stored_id"), True)
+            else:
+                notify_warn(self.nvim, "No animation in the output of the cell under the cursor")
+            return
+
+        html = (chunk.jupyter_data or {}).get("text/html", "")
+        import hashlib
+
+        anim_id = hashlib.sha1(html.encode("utf-8", "replace")).hexdigest()[:16]
+        if state.get("open") and state.get("open_id") == anim_id:
+            self.nvim.exec_lua("require('molten.video').close()")  # the same key closes it
+            return
+        if state.get("exists") and state.get("stored_id") == anim_id:
+            self.nvim.exec_lua("require('molten.video').open(...)", anim_id)  # already encoded
+            return
+
+        frames, interval = animation_frames_from_html(html)
+        if not frames:
+            notify_warn(self.nvim, "Couldn't find the animation's frames in the output")
+            return
+        import base64
+        import tempfile
+
+        folder = tempfile.mkdtemp(prefix="molten-video-")
+        files = []
+        for i, (fext, b64) in enumerate(frames, 1):
+            path = os.path.join(folder, f"frame_{i:05d}.{fext}")
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64))
+            files.append(path)
+        source = self.nvim.funcs.expand("%:t") or None
+        self.nvim.exec_lua(
+            "require('molten.video').encode_and_open(...)", files, interval, folder, anim_id, source
+        )
+
     @pynvim.command("MoltenToggleExpandOutput", nargs="0", sync=True, bang=True)  # type: ignore
     @nvimui  # type: ignore
     def command_toggle_expand_output(self, args: List[Any], bang: bool) -> None:
