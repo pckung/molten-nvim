@@ -140,13 +140,8 @@ class JupyterAPIClient:
             if time.time() - start >= timeout:
                 raise RuntimeError(f"Kernel not ready (state: {state})")
             time.sleep(0.1)
-
-        # Discard anything queued while starting up.
-        while True:
-            try:
-                self._iopub_queue.get_nowait()
-            except EmptyQueueException:
-                return
+        # (Nothing to discard here: only replies to our own requests are queued, and a cell run
+        # right after connecting must keep its output. Discarding them left it "On Hold".)
 
     # --- messaging --------------------------------------------------------------------------
 
@@ -232,6 +227,30 @@ class JupyterAPIClient:
 
     def cleanup_connection_file(self) -> None:
         pass
+
+
+def resolve_kernel_id(url: str) -> Optional[str]:
+    """The id of the server kernel a molten URL points at, without starting anything: the
+    `kernel_id` given, or the kernel of the `session` (file) if the server has one. None when the
+    URL would start a new kernel."""
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    if query.get("kernel_id"):
+        return query["kernel_id"][0]
+    if not query.get("session"):
+        return None
+    base = f"{parsed.scheme}://{parsed.netloc}{parsed.path}".rstrip("/")
+    headers = {"Authorization": f"token {query['token'][0]}"} if query.get("token") else {}
+    try:
+        import requests
+
+        response = requests.get(f"{base}/api/sessions", headers=headers, timeout=REQUEST_TIMEOUT)
+        for session in response.json() if response.ok else []:
+            if session.get("path") == query["session"][0] and session.get("kernel"):
+                return session["kernel"]["id"]
+    except Exception:
+        pass
+    return None
 
 
 class JupyterAPIManager:

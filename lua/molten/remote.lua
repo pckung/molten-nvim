@@ -620,6 +620,36 @@ local function pick_kernelspec(conn, cb)
   end)
 end
 
+-- remembered kernels ----------------------------------------------------------------------
+-- When you attach a file to a running kernel (:MoltenRemoteAttach), that choice is saved, and
+-- :MoltenRemoteConnect from the same file reconnects to that kernel (as long as it's still
+-- running) instead of the file's own session. Stored in stdpath("data")/molten-remote/kernels.json.
+
+local function remembered_file()
+  return vim.fn.stdpath("data") .. "/molten-remote/kernels.json"
+end
+
+local function remembered_all()
+  local data = read_json(remembered_file())
+  return type(data) == "table" and data or {}
+end
+
+local function remember(buf, host, kernel_id)
+  local file = vim.api.nvim_buf_get_name(buf)
+  if file == "" then
+    return
+  end
+  local data = remembered_all()
+  data[file] = kernel_id and { host = host, kernel_id = kernel_id } or nil
+  vim.fn.mkdir(vim.fn.fnamemodify(remembered_file(), ":h"), "p")
+  vim.fn.writefile({ vim.json.encode(data) }, remembered_file())
+end
+
+local function remembered(buf, host)
+  local entry = remembered_all()[vim.api.nvim_buf_get_name(buf)]
+  return entry and entry.host == host and entry.kernel_id or nil
+end
+
 -- public API ----------------------------------------------------------------------------------
 
 --- Connect to `name` (profile name or ssh destination) and start a new kernel in the current
@@ -635,6 +665,22 @@ function M.connect(name, opts)
     if not init then
       return
     end
+    -- the kernel you attached this file to last time, if it's still running
+    local kept = not opts.kernel and remembered(buf, conn.name)
+    if kept then
+      return http_get_json(conn, "api/kernels/" .. kept, function(info)
+        if info and info.id then
+          molten_init(buf, server_url(conn, { kernel_id = kept }))
+          if opts.on_init then
+            opts.on_init()
+          end
+          return
+        end
+        remember(buf, conn.name, nil)
+        notify("the kernel this file was attached to is gone; connecting to the file's own kernel")
+        M.connect(name, opts)
+      end)
+    end
     local keep = conn.profile.keep_kernels
     if keep == nil then
       keep = config.keep_kernels
@@ -646,6 +692,9 @@ function M.connect(name, opts)
         session = session,
         keep_kernel = keep and "1" or nil,
       }))
+      if opts.on_init then
+        opts.on_init()
+      end
     end
     local kernel = opts.kernel or conn.profile.kernel
     if kernel then
@@ -672,6 +721,7 @@ function M.attach(name, kernel_id)
   local buf = vim.api.nvim_get_current_buf()
   ensure_connection(name, function(conn)
     if kernel_id then
+      remember(buf, conn.name, kernel_id)
       return molten_init(buf, server_url(conn, { kernel_id = kernel_id }))
     end
     http_get_json(conn, "api/sessions", function(sessions)
@@ -705,6 +755,7 @@ function M.attach(name, kernel_id)
           end,
         }, function(k)
           if k then
+            remember(buf, conn.name, k.id)
             molten_init(buf, server_url(conn, { kernel_id = k.id }))
           end
         end)
@@ -835,6 +886,10 @@ function M.setup(opts)
       end
     end,
   })
+  cmd("MoltenRemoteForget", function()
+    remember(vim.api.nvim_get_current_buf(), nil, nil)
+    notify("forgot the kernel this file was attached to; :MoltenRemoteConnect uses its own kernel again")
+  end, { desc = "Stop reconnecting this file to the kernel it was attached to" })
   cmd("MoltenRemoteSaveOutputs", function()
     M.save_outputs()
   end, { desc = "Save this file's outputs now (also happens on every write)" })

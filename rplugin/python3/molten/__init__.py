@@ -17,6 +17,7 @@ from molten.outputbuffer import OutputBuffer
 from molten.outputchunks import AnimationOutputChunk, animation_frames_from_html
 from molten.position import DynamicPosition, Position
 from molten.runtime import get_available_kernels
+from molten.jupyter_server_api import JupyterAPIManager, resolve_kernel_id
 from molten.utils import MoltenException, notify_error, notify_info, notify_warn, nvimui
 from pynvim import Nvim
 
@@ -180,8 +181,58 @@ class Molten:
         for m in molten_kernels:
             m.on_cursor_moved(scrolled)
 
+    @staticmethod
+    def _server_kernel_id(kernel: MoltenKernel) -> Optional[str]:
+        """id of the Jupyter Server kernel a molten kernel talks to (None for local kernels)"""
+        manager = getattr(kernel.runtime, "kernel_manager", None)
+        if isinstance(manager, JupyterAPIManager):
+            return manager.kernel_id
+        return None
+
+    def _detach_buffer(self, buffer: Buffer) -> None:
+        """Take this buffer off the kernel(s) it uses, leaving server kernels running: connecting
+        a file to another kernel replaces its kernel instead of adding a second one (which made
+        every run ask which kernel to use)."""
+        kernels = list(self.buffers.get(buffer.number) or [])
+        if not kernels:
+            return
+        self._clear_interface(kernels)
+        for kernel in kernels:
+            if len(kernel.buffers) > 1:  # other files still use it
+                kernel.buffers = [b for b in kernel.buffers if b.number != buffer.number]
+                continue
+            manager = getattr(kernel.runtime, "kernel_manager", None)
+            if isinstance(manager, JupyterAPIManager):
+                manager._kernel_info["_keep"] = True  # don't shut it down on the server
+            kernel.deinit()
+            self.molten_kernels.pop(kernel.kernel_id, None)
+        self.buffers.pop(buffer.number, None)
+        notify_info(
+            self.nvim,
+            "Disconnected this file from " + ", ".join(k.kernel_id for k in kernels)
+            + " (still running on the server)" * any(self._server_kernel_id(k) for k in kernels),
+        )
+
     def _initialize_buffer(self, kernel_name: str, shared=False) -> MoltenKernel | None:
         assert self.canvas is not None
+        remote = kernel_name.startswith("http://") or kernel_name.startswith("https://")
+        if remote and not shared:
+            buffer = self.nvim.current.buffer
+            target = resolve_kernel_id(kernel_name)
+            if target:
+                for kernel in self.buffers.get(buffer.number) or []:
+                    if self._server_kernel_id(kernel) == target:
+                        notify_info(self.nvim, f"Already connected to {kernel.kernel_id}")
+                        return kernel
+                for kernel in self.molten_kernels.values():
+                    if self._server_kernel_id(kernel) == target:
+                        # another file already talks to this kernel: share that connection
+                        self._detach_buffer(buffer)
+                        kernel.add_nvim_buffer(buffer)
+                        self.buffers[buffer.number] = [kernel]
+                        notify_info(self.nvim, f"Connected to {kernel.kernel_id} (shared with your other open files)")
+                        return kernel
+            self._detach_buffer(buffer)
         if shared:  # use an existing molten kernel, for a new neovim buffer
             molten = self.molten_kernels.get(kernel_name)
             if molten is not None:
@@ -209,6 +260,19 @@ class Molten:
                 kernel_name,
                 kernel_id,
             )
+
+            if remote:
+                # a short name instead of the URL (which has the token in it, and & and % that
+                # break commands): kernel spec name + the start of the server's kernel id
+                manager = molten.runtime.kernel_manager
+                spec = manager._kernel_info.get("name") or "remote"
+                base = f"{spec}-{manager.kernel_id[:8]}"
+                kernel_id, n = base, 1
+                while kernel_id in self.molten_kernels:
+                    n += 1
+                    kernel_id = f"{base}-{n}"
+                molten.kernel_id = kernel_id
+                molten.runtime.kernel_id = kernel_id
 
             self.add_kernel(self.nvim.current.buffer, kernel_id, molten)
             molten._doautocmd("MoltenInitPost")
