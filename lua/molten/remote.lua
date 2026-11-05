@@ -155,7 +155,7 @@ end
 
 --- Minimal async HTTP/1.0 GET against the local end of the tunnel.
 ---@param cb fun(status: integer|nil, body: string|nil, err: string|nil)
-local function http_get(port, path, token, cb)
+local function http_request(method, port, path, token, cb)
   local tcp = uv.new_tcp()
   local chunks = {}
   local done = false
@@ -175,7 +175,7 @@ local function http_get(port, path, token, cb)
     if err then
       return finish(nil, nil, err)
     end
-    local req = "GET " .. path .. " HTTP/1.0\r\nHost: localhost:" .. port .. "\r\n"
+    local req = method .. " " .. path .. " HTTP/1.0\r\nHost: localhost:" .. port .. "\r\n"
     if token and token ~= "" then
       req = req .. "Authorization: token " .. token .. "\r\n"
     end
@@ -200,6 +200,10 @@ local function http_get(port, path, token, cb)
   vim.defer_fn(function()
     finish(nil, nil, "timeout")
   end, 10000)
+end
+
+local function http_get(port, path, token, cb)
+  http_request("GET", port, path, token, cb)
 end
 
 local function http_get_json(conn, path, cb)
@@ -767,6 +771,99 @@ function M.attach(name, kernel_id)
   end)
 end
 
+--- Shut a kernel down on the server (its variables are gone). Files connected to it are
+--- disconnected first. Without `kernel_id`, pick from the running kernels.
+function M.shutdown(name, kernel_id)
+  ensure_connection(name, function(conn)
+    http_get_json(conn, "api/sessions", function(sessions)
+      http_get_json(conn, "api/kernels", function(kernels, err)
+        if not kernels then
+          return notify(conn.name .. ": could not list kernels: " .. err, vim.log.levels.ERROR)
+        end
+        local paths, session_of = {}, {}
+        for _, s in ipairs(sessions or {}) do
+          if s.kernel then
+            paths[s.kernel.id] = s.path or s.name
+            session_of[s.kernel.id] = s.id
+          end
+        end
+        local function kill(k)
+          local label = string.format("%s %s%s", k.name, k.id:sub(1, 8), paths[k.id] and ("  (" .. paths[k.id] .. ")") or "")
+          if vim.fn.confirm("Shut down kernel " .. label .. " on the server?\nIts variables are lost.", "&Yes\n&No", 2) ~= 1 then
+            return
+          end
+          -- disconnect open files that use it
+          local short = k.id:sub(1, 8)
+          for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+            if vim.api.nvim_buf_is_loaded(buf) then
+              vim.api.nvim_buf_call(buf, function()
+                local ok, ids = pcall(vim.fn.MoltenRunningKernels, true)
+                for _, id in ipairs(ok and ids or {}) do
+                  if id:find(short, 1, true) then
+                    pcall(vim.cmd, "MoltenDeinit")
+                    vim.b[buf].molten_remote = nil
+                    break
+                  end
+                end
+              end)
+            end
+          end
+          -- forget it for files that were attached to it
+          local data = remembered_all()
+          local changed = false
+          for file, entry in pairs(data) do
+            if entry.kernel_id == k.id then
+              data[file], changed = nil, true
+            end
+          end
+          if changed then
+            vim.fn.writefile({ vim.json.encode(data) }, remembered_file())
+          end
+          local path = session_of[k.id] and ("api/sessions/" .. session_of[k.id]) or ("api/kernels/" .. k.id)
+          http_request("DELETE", conn.local_port, conn.base_url .. path, conn.token, function(status, _, derr)
+            if status and status >= 200 and status < 300 then
+              notify("shut down kernel " .. label)
+            else
+              notify("couldn't shut down " .. label .. ": " .. tostring(derr or ("HTTP " .. tostring(status))),
+                vim.log.levels.ERROR)
+            end
+          end)
+        end
+        if kernel_id then
+          for _, k in ipairs(kernels) do
+            if k.id == kernel_id or k.id:sub(1, #kernel_id) == kernel_id then
+              return kill(k)
+            end
+          end
+          return notify(conn.name .. ": no running kernel " .. kernel_id, vim.log.levels.WARN)
+        end
+        if #kernels == 0 then
+          return notify(conn.name .. ": no running kernels", vim.log.levels.WARN)
+        end
+        local mine = config.session_name and config.session_name(vim.api.nvim_get_current_buf()) or nil
+        table.sort(kernels, function(a, b)
+          local am, bm = paths[a.id] == mine, paths[b.id] == mine
+          if am ~= bm then
+            return am
+          end
+          return (a.last_activity or "") > (b.last_activity or "")
+        end)
+        vim.ui.select(kernels, {
+          prompt = "Shut down kernel (" .. conn.name .. ")",
+          format_item = function(k)
+            return string.format("%s  %s  [%s]%s", k.id:sub(1, 8), k.name, k.execution_state,
+              paths[k.id] and ("  " .. paths[k.id]) or "")
+          end,
+        }, function(k)
+          if k then
+            kill(k)
+          end
+        end)
+      end)
+    end)
+  end)
+end
+
 --- Close the tunnel for `name` (all connections if nil). A server started by molten is stopped.
 function M.disconnect(name)
   for n, conn in pairs(connections) do
@@ -856,6 +953,13 @@ function M.setup(opts)
     nargs = "+",
     complete = complete_hosts,
     desc = "Attach to a kernel running on a remote Jupyter Server",
+  })
+  cmd("MoltenRemoteShutdown", function(a)
+    M.shutdown(a.fargs[1], a.fargs[2])
+  end, {
+    nargs = "+",
+    complete = complete_hosts,
+    desc = "Shut down a kernel on a remote Jupyter Server (pick one, or give its id)",
   })
   cmd("MoltenRemoteDisconnect", function(a)
     M.disconnect(a.fargs[1])

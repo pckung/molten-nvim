@@ -81,6 +81,7 @@ All options with their defaults are at the top of
 |---------|-------------|
 | `:MoltenRemoteConnect {host} [kernel]` | `{host}` can also be a port (`8888`, `localhost:8888`) that is already forwarded. Open the tunnel (and start the server, if configured). Then initialize molten in the current buffer with **this file's kernel if one is still running on the server**, or a new one. `{host}` is a profile name or any ssh destination (`user@host`). With `!`, only open the tunnel. |
 | `:MoltenRemoteAttach {host} [kernel_id]` | Pick any running kernel on the server (this file's comes first, and the list shows which file or notebook each one belongs to) and attach the current buffer to it. Molten never shuts down a kernel it attached to. The choice is remembered: `:MoltenRemoteConnect` from this file reconnects to that kernel while it's running. |
+| `:MoltenRemoteShutdown {host} [kernel_id]` | Shut a kernel down on the server (its variables are lost): pick from the running kernels (this file's first), or give its id. Asks first; open files using it are disconnected. `:MoltenDeinit` only disconnects, since remote kernels are kept running. |
 | `:MoltenRemoteForget` | Stop reconnecting this file to the kernel it was attached to; `:MoltenRemoteConnect` uses the file's own kernel again. |
 | `:MoltenRemoteDisconnect [host]` | Close the tunnel (all of them without an argument). A server molten started is stopped, together with its kernels. |
 | `:MoltenRemoteStatus` | List connections. |
