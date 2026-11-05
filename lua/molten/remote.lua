@@ -547,9 +547,22 @@ function M.save_outputs(buf)
   if not path or not vim.b[buf].molten_remote then
     return
   end
+  -- never replace saved outputs with none: a file connected without its outputs (e.g. when
+  -- restoring them failed) would otherwise wipe them on the next :w
+  local tmp = path .. ".new"
   vim.api.nvim_buf_call(buf, function()
-    pcall(vim.fn.MoltenSaveOutputs, path)
+    pcall(vim.fn.MoltenSaveOutputs, tmp)
   end)
+  local new = read_json(tmp)
+  if not new then
+    return
+  end
+  local old = read_json(path)
+  if #(new.cells or {}) == 0 and old and #(old.cells or {}) > 0 then
+    vim.fn.delete(tmp)
+    return
+  end
+  vim.fn.rename(tmp, path)
 end
 
 --- If `buf` has saved outputs that still match its contents, load them with a kernel from `url`.
@@ -559,6 +572,9 @@ local function restore_outputs(buf, url)
   local data = path and vim.fn.filereadable(path) == 1 and read_json(path)
   if not data then
     return false
+  end
+  if #(data.cells or {}) == 0 then
+    return false -- nothing saved for this file
   end
   if data.molten_remote_checksum ~= buf_checksum(buf) then
     notify("this file changed since its outputs were saved, so they weren't restored",
