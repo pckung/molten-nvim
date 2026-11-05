@@ -971,9 +971,12 @@ class Molten:
         buf = self.nvim.current.buffer
         data = save(kernels[0], buf.number)
         data["kernel"] = ""
-        data["molten_remote_checksum"] = hashlib.sha256(
-            "\n".join(buf.api.get_lines(0, -1, True)).encode("utf-8")
-        ).hexdigest()
+        lines = buf.api.get_lines(0, -1, True)
+        data["molten_remote_checksum"] = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+        # each cell's code, so its output can be put back on it after the file was edited
+        for cell in data["cells"]:
+            begin, end = cell["span"]["begin"]["lineno"], cell["span"]["end"]["lineno"]
+            cell["text"] = lines[begin : end + 1]
         with open(path, "w") as file:
             json.dump(data, file)
         return True

@@ -576,10 +576,24 @@ local function restore_outputs(buf, url)
   if #(data.cells or {}) == 0 then
     return false -- nothing saved for this file
   end
+  local note
   if data.molten_remote_checksum ~= buf_checksum(buf) then
-    notify("this file changed since its outputs were saved, so they weren't restored",
-      vim.log.levels.INFO)
-    return false
+    -- the file was edited since: put each saved output back on its cell's code
+    local has_text = data.cells[1] and data.cells[1].text
+    if not has_text then
+      notify("this file changed since its outputs were saved (by an older version, without the cells' "
+        .. "code), so they weren't restored", vim.log.levels.INFO)
+      return false
+    end
+    local saved = require("molten.saved_outputs")
+    local unchanged, edited, lost
+    data, unchanged, edited, lost = saved.relocate(data, vim.api.nvim_buf_get_lines(buf, 0, -1, false))
+    if #data.cells == 0 then
+      notify("none of the saved outputs' cells are in this file anymore", vim.log.levels.INFO)
+      return false
+    end
+    note = (edited > 0 and string.format(", %d of them on cells you edited since", edited) or "")
+      .. (lost > 0 and string.format("; %d couldn't be matched to a cell", lost) or "")
   end
   data.kernel = url
   local tmp = vim.fn.tempname() .. ".json" -- no spaces: :MoltenLoad splits its arguments
@@ -591,7 +605,7 @@ local function restore_outputs(buf, url)
   end
   local restored = ok and #vim.fn.MoltenRunningKernels(true) > 0
   if restored then
-    notify(string.format("restored the outputs of %d cell(s)", #(data.cells or {})))
+    notify(string.format("restored the outputs of %d cell(s)%s", #(data.cells or {}), note or ""))
   end
   return restored
 end
@@ -600,6 +614,7 @@ local function molten_init(buf, url)
   if not vim.api.nvim_buf_is_valid(buf) then
     return
   end
+  require("molten.saved_outputs").hide(buf) -- the real outputs replace the read-only ones
   vim.api.nvim_buf_call(buf, function()
     if config.save_outputs and restore_outputs(buf, url) then
       vim.b[buf].molten_remote = true
@@ -880,6 +895,32 @@ function M.shutdown(name, kernel_id)
   end)
 end
 
+--- Show (or hide again) this file's saved outputs without connecting to a kernel: read-only, from
+--- the last :w while it was connected. Edited cells get the output of their closest match.
+function M.toggle_saved(buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local saved = require("molten.saved_outputs")
+  if vim.b[buf].molten_saved_shown then
+    return saved.hide(buf)
+  end
+  if #vim.fn.MoltenRunningKernels(true) > 0 then
+    return notify("this file is connected to a kernel: its outputs are the real ones")
+  end
+  local path = outputs_file(buf)
+  local data = path and vim.fn.filereadable(path) == 1 and read_json(path)
+  if not data or #(data.cells or {}) == 0 then
+    return notify("no saved outputs for this file (they're saved on :w while connected)")
+  end
+  if not (data.cells[1] and data.cells[1].text) and data.molten_remote_checksum ~= buf_checksum(buf) then
+    return notify("this file changed since its outputs were saved by an older version; run the cells "
+      .. "and :w once to save them in the new format")
+  end
+  local shown, _, edited, lost = saved.show(buf, data)
+  notify(string.format("showing %d saved output(s), read-only%s%s; <leader>jc connects", shown,
+    edited > 0 and string.format(" (%d on edited cells)", edited) or "",
+    lost > 0 and string.format(", %d couldn't be matched", lost) or ""))
+end
+
 --- Close the tunnel for `name` (all connections if nil). A server started by molten is stopped.
 function M.disconnect(name)
   for n, conn in pairs(connections) do
@@ -970,6 +1011,9 @@ function M.setup(opts)
     complete = complete_hosts,
     desc = "Attach to a kernel running on a remote Jupyter Server",
   })
+  cmd("MoltenRemoteShowSaved", function()
+    M.toggle_saved()
+  end, { desc = "Show / hide this file's saved outputs without a kernel (read-only)" })
   cmd("MoltenRemoteShutdown", function(a)
     M.shutdown(a.fargs[1], a.fargs[2])
   end, {

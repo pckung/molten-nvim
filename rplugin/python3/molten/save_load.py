@@ -73,7 +73,8 @@ def _load_error_chunk(error: Dict[str, Any]) -> ErrorOutputChunk:
 def load(nvim: Nvim, moltenbuffer: MoltenKernel, nvim_buffer: Buffer, data: Dict[str, Any]) -> None:
     MoltenIOError.assert_has_key(data, "content_checksum", str)
 
-    if moltenbuffer._get_content_checksum() != data["content_checksum"]:
+    # "relocated": molten.remote already moved every cell onto its code in the edited file
+    if not data.get("relocated") and moltenbuffer._get_content_checksum() != data["content_checksum"]:
         raise MoltenIOError("Buffer contents' checksum does not match!")
 
     MoltenIOError.assert_has_key(data, "cells", list)
