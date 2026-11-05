@@ -147,7 +147,7 @@ local function open(key, p, interval_ms)
   end
   vim.api.nvim_buf_set_lines(p.buf, 0, -1, false, lines)
   vim.bo[p.buf].modifiable = false
-  p.win = vim.api.nvim_open_win(p.buf, false, {
+  p.win = vim.api.nvim_open_win(p.buf, true, { -- the cursor moves into it
     relative = "editor",
     row = math.max(0, math.floor((vim.o.lines - p.height) / 2) - 1),
     col = math.max(0, vim.o.columns - p.width - 4),
@@ -155,13 +155,18 @@ local function open(key, p, interval_ms)
     height = p.height,
     style = "minimal",
     border = "rounded",
-    title = " animation (<leader>jP or q stops) ",
+    title = " animation · q close · space pause ",
     title_pos = "center",
     focusable = true,
     noautocmd = true,
   })
   vim.wo[p.win].winhighlight = "Normal:Normal"
-  vim.keymap.set("n", "q", function() M.stop(key) end, { buffer = p.buf, nowait = true })
+  vim.keymap.set("n", "q", function() M.stop(key) end, { buffer = p.buf, nowait = true, desc = "Close the animation" })
+  vim.keymap.set("n", "<Esc>", function() M.stop(key) end, { buffer = p.buf, nowait = true, desc = "Close the animation" })
+  vim.keymap.set("n", "<Space>", function()
+    p.paused = not p.paused
+    vim.api.nvim_echo({ { p.paused and "[Molten] paused" or "[Molten] playing" } }, false, {})
+  end, { buffer = p.buf, nowait = true, desc = "Pause / resume" })
   vim.api.nvim_create_autocmd("WinClosed", {
     pattern = tostring(p.win),
     once = true,
@@ -172,7 +177,7 @@ local function open(key, p, interval_ms)
     interval_ms,
     math.max(math.floor(interval_ms), 30),
     vim.schedule_wrap(function()
-      if players[key] ~= p or not (p.win and vim.api.nvim_win_is_valid(p.win)) then
+      if players[key] ~= p or p.paused or not (p.win and vim.api.nvim_win_is_valid(p.win)) then
         return
       end
       p.i = p.i % #p.frames + 1

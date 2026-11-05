@@ -1232,13 +1232,15 @@ class Molten:
         if bang:
             self.nvim.exec_lua("require('molten.animation').stop_all()")
             return
-        mode = (args[0] if args else None) or self.nvim.vars.get("molten_animation_mode") or "image"
-        if mode not in ("image", "text"):
-            notify_warn(self.nvim, f"Unknown animation mode {mode!r}: use image or text")
+        mode = (args[0] if args else None) or self.nvim.vars.get("molten_animation_mode") or "popup"
+        if mode == "image":
+            mode = "inline"  # the old name
+        if mode not in ("popup", "inline", "text"):
+            notify_warn(self.nvim, f"Unknown animation mode {mode!r}: use popup, inline or text")
             return
         kernels = self._get_current_buf_kernels(True)
         assert kernels is not None
-        if mode == "image" and self.options.image_provider != "snacks.nvim":
+        if mode != "text" and self.options.image_provider != "snacks.nvim":
             notify_warn(
                 self.nvim,
                 "Playing animations in place needs molten_image_provider = \"snacks.nvim\"; "
@@ -1251,7 +1253,7 @@ class Molten:
                 continue
             for chunk in kern.outputs[cell].output.chunks:
                 if isinstance(chunk, AnimationOutputChunk):
-                    if mode == "image" and not chunk.img_identifier:
+                    if mode == "inline" and not chunk.img_identifier:
                         notify_warn(self.nvim, "Show the output first (it's hidden)")
                         return
                     if not all(os.path.exists(f) for f in chunk.frames):
@@ -1278,17 +1280,23 @@ class Molten:
                         chunk.interval_ms,
                         mode,
                     )
-                    if playing and mode == "image":
+                    if playing and mode == "inline":
                         notify_info(
                             self.nvim,
                             f"Loading {len(chunk.frames)} frames; it starts playing when they're all "
                             "ready. Run it again to stop",
                         )
+                    elif playing and mode == "popup":
+                        notify_info(
+                            self.nvim,
+                            f"Loading {len(chunk.frames)} frames in a pop-up; it starts playing when "
+                            "they're all ready. q closes it, <Space> pauses",
+                        )
                     elif playing:
                         notify_info(
                             self.nvim,
-                            f"Converting {len(chunk.frames)} frames to text; a window opens when "
-                            "they're ready. Run it again (or q in the window) to stop",
+                            f"Converting {len(chunk.frames)} frames to text; a pop-up opens when "
+                            "they're ready. q closes it, <Space> pauses",
                         )
                     return
         notify_warn(self.nvim, "No animation in the output of the cell under the cursor")

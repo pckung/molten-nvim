@@ -1,5 +1,5 @@
--- Plays animations (a list of frame image files) in place of molten's image output, with the
--- snacks.nvim image provider. Used by :MoltenToggleAnimation.
+-- Plays animations (a list of frame image files) with the snacks.nvim image provider, in a pop-up
+-- window (default) or in place of molten's image output. Used by :MoltenToggleAnimation.
 --
 -- Swapping frames doesn't redraw anything: snacks.nvim shows an image through placeholder cells in
 -- the buffer whose colour says which image to show (kitty graphics protocol, unicode placeholders).
@@ -18,8 +18,14 @@ local M = {}
 ---@type table<string, molten.Player> keyed by the first frame's file
 local players = {}
 
---- the open snacks placements currently showing this animation (inline and/or output window)
-local function placements(ids)
+--- the open snacks placements currently showing this animation: its pop-up, or molten's inline /
+--- output-window copies
+local function placements(player)
+  if player.popup then
+    local pl = player.popup.placement
+    return (pl and not pl.closed and vim.api.nvim_win_is_valid(player.popup.win)) and { pl } or {}
+  end
+  local ids = player.ids
   local ok, api = pcall(require, "load_snacks_nvim")
   if not ok or not api or not api.snacks_api then
     return {}
@@ -82,8 +88,16 @@ function M.stop(key)
   player.timer:stop()
   player.timer:close()
   local first = player.imgs[1]
-  if first and ensure_sent(first) then
-    for _, pl in ipairs(placements(player.ids)) do
+  if player.popup then
+    local pop = player.popup
+    if pop.placement then
+      pcall(pop.placement.close, pop.placement)
+    end
+    if vim.api.nvim_win_is_valid(pop.win) then
+      pcall(vim.api.nvim_win_close, pop.win, true)
+    end
+  elseif first and ensure_sent(first) then
+    for _, pl in ipairs(placements(player)) do
       show(pl, first) -- back to the first frame
     end
   end
@@ -119,8 +133,8 @@ function M.status()
       frames[#frames + 1] = img:failed() and "F" or img:ready() and (img.sent and "S" or "r") or "."
       readable = readable + (vim.fn.filereadable(img.src) == 1 and 1 or 0)
     end
-    local vis = {}
-    for _, id in ipairs(p.ids) do
+    local vis = p.popup and { "pop-up=" .. (vim.api.nvim_win_is_valid(p.popup.win) and "open" or "closed") } or {}
+    for _, id in ipairs(p.popup and {} or p.ids) do
       local api = require("load_snacks_nvim").snacks_api
       local pl = api.get_placement(id)
       vis[#vis + 1] = (id:match("^virt%-") and "inline" or "window") .. "="
@@ -194,10 +208,13 @@ local function play(key, player, interval_ms)
     0,
     math.max(math.floor(interval_ms), 30), -- ~33 fps at most
     vim.schedule_wrap(function()
-      if players[key] ~= player then
+      if players[key] ~= player or player.paused then
         return
       end
-      local visible = placements(player.ids)
+      if player.popup and not vim.api.nvim_win_is_valid(player.popup.win) then
+        return M.stop(key) -- the pop-up was closed
+      end
+      local visible = placements(player)
       if #visible == 0 then
         -- output hidden or being redrawn: wait for it, but give up if it's gone for good (~10 s)
         player.missing = player.missing + 1
@@ -260,6 +277,12 @@ local function load_then_play(key, player, interval_ms)
         return
       end
       player.loading = false
+      if player.popup then
+        if not vim.api.nvim_win_is_valid(player.popup.win) then
+          return M.stop(key)
+        end
+        M._popup_image(player)
+      end
       vim.notify(string.format("[Molten] playing %d frames%s", loaded,
         failed > 0 and (" (" .. failed .. " couldn't be loaded)") or ""))
       play(key, player, interval_ms)
@@ -267,12 +290,77 @@ local function load_then_play(key, player, interval_ms)
   )
 end
 
+--- the pop-up window: centred, sized to the animation, the cursor moves into it.
+--- q / <Esc> close it (and stop), <Space> pauses / resumes.
+local function open_popup(key, player, files)
+  local maxw, maxh = math.floor(vim.o.columns * 0.85), math.floor(vim.o.lines * 0.85) - 2
+  local ok, size = pcall(Snacks.image.util.fit, files[1], { width = maxw, height = maxh })
+  local w = math.max(math.min(ok and size.width or 60, maxw), 34)
+  local h = math.max(math.min(ok and size.height or 20, maxh), 3)
+  local buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[buf].bufhidden = "wipe"
+  vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "", string.format("  Loading %d frames…", #files) })
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    row = math.max(0, math.floor((vim.o.lines - h) / 2) - 1),
+    col = math.max(0, math.floor((vim.o.columns - w) / 2)),
+    width = w,
+    height = h,
+    style = "minimal",
+    border = "rounded",
+    title = " animation · q close · space pause ",
+    title_pos = "center",
+  })
+  player.popup = { win = win, buf = buf, width = w, height = h }
+  local function map(lhs, fn, desc)
+    vim.keymap.set("n", lhs, fn, { buffer = buf, nowait = true, desc = desc })
+  end
+  map("q", function() M.stop(key) end, "Close the animation")
+  map("<Esc>", function() M.stop(key) end, "Close the animation")
+  map("<Space>", function()
+    player.paused = not player.paused
+    vim.api.nvim_echo({ { player.paused and "[Molten] paused" or "[Molten] playing" } }, false, {})
+  end, "Pause / resume")
+  vim.api.nvim_create_autocmd("WinClosed", {
+    pattern = tostring(win),
+    once = true,
+    callback = function() vim.schedule(function() M.stop(key) end) end,
+  })
+end
+
+--- show the first frame in the pop-up, filling it (like snacks.nvim's image pop-up)
+function M._popup_image(player)
+  local pop = player.popup
+  vim.api.nvim_buf_set_lines(pop.buf, 0, -1, false, { "" })
+  local opts = Snacks.config.merge({}, Snacks.image.config.doc, {
+    inline = false,
+    max_width = pop.width,
+    max_height = pop.height,
+    on_update_pre = function(pl)
+      -- fit the window to the image once its size is known
+      local loc = pl:state().loc
+      if vim.api.nvim_win_is_valid(pop.win) and loc.width > 0 and loc.height > 0 then
+        local cfg = vim.api.nvim_win_get_config(pop.win)
+        if cfg.width ~= loc.width or cfg.height ~= loc.height then
+          vim.api.nvim_win_set_config(pop.win, {
+            relative = "editor", width = loc.width, height = loc.height,
+            row = math.max(0, math.floor((vim.o.lines - loc.height) / 2) - 1),
+            col = math.max(0, math.floor((vim.o.columns - loc.width) / 2)),
+          })
+        end
+      end
+    end,
+  })
+  pop.placement = Snacks.image.placement.new(pop.buf, player.imgs[1].src, opts)
+end
+
 --- Start (or stop) playing. Returns true when it's now loading/playing.
 ---@param ids string[] molten's identifiers for the image (inline "virt-<file>", window "<file>")
 ---@param files string[] frame image files, in order
 ---@param interval_ms number time per frame
----@param mode? "image"|"text" image: in place, in the output (snacks.nvim); text: coloured
----  text characters in a pop-up window (works in any terminal). Default: vim.g.molten_animation_mode
+---@param mode? "popup"|"inline"|"text" popup (default): the images in a pop-up window, the cursor
+---  in it; inline: in place, in the output (also "image", the old name); text: coloured text
+---  characters in a pop-up window (works in any terminal). Default: vim.g.molten_animation_mode
 function M.toggle(ids, files, interval_ms, mode)
   local key = files[1]
   local text = require("molten.animation_text")
@@ -281,7 +369,7 @@ function M.toggle(ids, files, interval_ms, mode)
     text.stop(key)
     return false
   end
-  mode = mode or vim.g.molten_animation_mode or "image"
+  mode = mode or vim.g.molten_animation_mode or "popup"
   if mode == "text" then
     return text.start(key, files, interval_ms)
   end
@@ -300,6 +388,9 @@ function M.toggle(ids, files, interval_ms, mode)
     timer = assert((vim.uv or vim.loop).new_timer()),
   }
   players[key] = player
+  if mode == "popup" then
+    open_popup(key, player, files)
+  end
   -- lower resolution = smaller frames = faster to load and send, same size on screen
   local dpi = tonumber(vim.g.molten_animation_dpi or 72)
   shrink(files, dpi, tonumber(vim.g.molten_animation_max_mb or 150), function()
