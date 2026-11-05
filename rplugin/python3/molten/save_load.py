@@ -78,6 +78,8 @@ def load(nvim: Nvim, moltenbuffer: MoltenKernel, nvim_buffer: Buffer, data: Dict
 
     MoltenIOError.assert_has_key(data, "cells", list)
     for cell in data["cells"]:
+        if isinstance(cell, dict) and cell.get("execution_count") is None and not cell.get("chunks"):
+            continue  # still waiting when the outputs were saved, and never produced anything
         MoltenIOError.assert_has_key(cell, "span", dict)
         MoltenIOError.assert_has_key(cell["span"], "begin", dict)
         MoltenIOError.assert_has_key(cell["span"]["begin"], "lineno", int)
@@ -104,8 +106,13 @@ def load(nvim: Nvim, moltenbuffer: MoltenKernel, nvim_buffer: Buffer, data: Dict
 
         # XXX: do we really want to have the execution count here?
         #      what happens when the counts start to overlap?
-        MoltenIOError.assert_has_key(cell, "execution_count", int)
-        output = Output(cell["execution_count"])
+        # None: the cell was still waiting / running when the outputs were saved
+        count = cell.get("execution_count")
+        if count is not None and not isinstance(count, int):
+            raise MoltenIOError(
+                f"Incorrect type for key 'execution_count': expected int or None, got {type(count).__name__}"
+            )
+        output = Output(count)
 
         MoltenIOError.assert_has_key(cell, "status", int)
         output.status = OutputStatus(cell["status"])
