@@ -897,6 +897,60 @@ end
 
 --- Show (or hide again) this file's saved outputs without connecting to a kernel: read-only, from
 --- the last :w while it was connected. Edited cells get the output of their closest match.
+--- Throw away the current buffer's own kernel on `name`'s server (the one started for this file:
+--- its session), without asking: for scratch notebooks. Also forgets the file's saved outputs and
+--- remembered kernel. `done(ok)` is called when finished.
+function M.discard(name, buf, done)
+  buf = buf or vim.api.nvim_get_current_buf()
+  done = done or function() end
+  local session = config.session_name and config.session_name(buf) or nil
+  local file = outputs_file(buf)
+  if file then
+    vim.fn.delete(file)
+  end
+  remember(buf, name, nil)
+  vim.api.nvim_buf_call(buf, function() pcall(vim.cmd, "MoltenDeinit") end)
+  vim.b[buf].molten_remote = nil
+  local conn = connections[name]
+  if not session or not conn or conn.status ~= "connected" then
+    return done(true) -- not connected: nothing running for it here
+  end
+  http_get_json(conn, "api/sessions", function(sessions)
+    for _, s in ipairs(sessions or {}) do
+      if s.path == session then
+        return http_request("DELETE", conn.local_port, conn.base_url .. "api/sessions/" .. s.id, conn.token,
+          function(status)
+            done(status ~= nil and status >= 200 and status < 300)
+          end)
+      end
+    end
+    done(true)
+  end)
+end
+
+--- the name of the buffer's session on the server (see config.session_name)
+function M.session_name(buf)
+  return config.session_name and config.session_name(buf or vim.api.nvim_get_current_buf()) or nil
+end
+
+--- After the current buffer was saved under a new name (:saveas), keep its kernel on `name`'s
+--- server: remember that kernel for the new file, so <leader>jc / running a cell reconnects to it.
+--- `old_session` is the session name the file had before (config.session_name of the old name).
+function M.renamed(name, old_session, buf)
+  buf = buf or vim.api.nvim_get_current_buf()
+  local conn = connections[name]
+  if not conn or conn.status ~= "connected" then
+    return
+  end
+  http_get_json(conn, "api/sessions", function(sessions)
+    for _, s in ipairs(sessions or {}) do
+      if s.path == old_session and s.kernel then
+        return remember(buf, name, s.kernel.id)
+      end
+    end
+  end)
+end
+
 function M.toggle_saved(buf)
   buf = buf or vim.api.nvim_get_current_buf()
   local saved = require("molten.saved_outputs")
