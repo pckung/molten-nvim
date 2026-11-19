@@ -14,7 +14,7 @@ from molten.save_load import MoltenIOError, get_default_save_file, load, save
 from molten.moltenbuffer import MoltenKernel
 from molten.options import MoltenOptions
 from molten.outputbuffer import OutputBuffer
-from molten.outputchunks import AnimationOutputChunk, animation_frames_from_html
+from molten.outputchunks import AnimationOutputChunk, ImageOutputChunk, animation_frames_from_html
 from molten.position import DynamicPosition, Position
 from molten.runtime import get_available_kernels
 from molten.jupyter_server_api import JupyterAPIManager, resolve_kernel_id
@@ -1478,6 +1478,70 @@ class Molten:
                 out.set_virt_expanded(cell.end, not out.virt_expanded)
                 return
         notify_warn(self.nvim, "Put the cursor in a cell that has output")
+
+    def _output_images(self) -> Optional[List[str]]:
+        """image files in the output of the cell under the cursor (written again if molten's
+        temporary copy is gone); None (after a message) if there are none"""
+        kernels = self._get_current_buf_kernels(True)
+        assert kernels is not None
+        for kern in kernels:
+            cell = kern._get_selected_span()
+            if cell is None or cell not in kern.outputs:
+                continue
+            paths = []
+            for chunk in kern.outputs[cell].output.chunks:
+                if not isinstance(chunk, ImageOutputChunk):
+                    continue
+                if isinstance(chunk, AnimationOutputChunk):
+                    path = chunk.frames[0] if chunk.frames else chunk.img_path
+                else:
+                    path = chunk.img_path
+                if not os.path.exists(path):
+                    data = chunk.jupyter_data or {}
+                    for mime, ext in (("image/png", "png"), ("image/jpeg", "jpg")):
+                        if data.get(mime):
+                            import base64
+
+                            b64 = data[mime]
+                            if isinstance(b64, list):
+                                b64 = "".join(b64)
+                            with kern.runtime._alloc_file(ext, "wb") as (new_path, file):
+                                file.write(base64.b64decode(b64))  # type: ignore
+                            path = new_path
+                            break
+                if os.path.exists(path):
+                    paths.append(path)
+            if paths:
+                return paths
+        notify_warn(self.nvim, "No image in the output of the cell under the cursor")
+        return None
+
+    @pynvim.command("MoltenCopyImage", nargs="0", sync=True)  # type: ignore
+    @nvimui  # type: ignore
+    def command_copy_image(self, _args: List[Any]) -> None:
+        """
+        Copy the image in the output of the cell under the cursor to the system clipboard (paste
+        it into another app). With several images, asks which one.
+        """
+        paths = self._output_images()
+        if paths:
+            self.nvim.exec_lua("require('molten.image_clip').copy(...)", paths)
+
+    @pynvim.command("MoltenSaveImage", nargs="?", sync=True, complete="file")  # type: ignore
+    @nvimui  # type: ignore
+    def command_save_image(self, args: List[Any]) -> None:
+        """
+        Save the image in the output of the cell under the cursor to a file. The extension picks
+        the format (.png as it is; .jpg, .pdf, .tiff... converted). Without a path, asks for one.
+        """
+        paths = self._output_images()
+        if not paths:
+            return
+        target = str(args[0]).strip() if args else ""
+        base = self.nvim.funcs.expand("%:p:r") or os.path.join(os.getcwd(), "figure")
+        self.nvim.exec_lua(
+            "require('molten.image_clip').save(...)", paths, target, base + "_figure.png"
+        )
 
     @pynvim.command("MoltenYankOutput", nargs="0", sync=True, bang=True)  # type: ignore
     @nvimui  # type: ignore
