@@ -57,7 +57,20 @@ class JupyterRuntime:
         elif ".json" not in self.kernel_name:
             self.external_kernel = False
             self.kernel_manager = jupyter_client.manager.KernelManager(kernel_name=kernel_name)
-            self.kernel_manager.start_kernel()
+            # run the kernel in the file's folder, like JupyterLab does with a notebook (relative
+            # paths in the code then work from the file), not in the folder Neovim's Python host
+            # happened to start in, which could contain a folder that shadows an installed package
+            cwd = None
+            try:
+                name = self.nvim.current.buffer.name
+                if name and os.path.isdir(os.path.dirname(name)):
+                    cwd = os.path.dirname(name)
+            except Exception:
+                cwd = None
+            if cwd is not None:
+                self.kernel_manager.start_kernel(cwd=cwd)
+            else:
+                self.kernel_manager.start_kernel()
             self.kernel_client = self.kernel_manager.client()
             assert isinstance(
                 self.kernel_client,
