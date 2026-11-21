@@ -1574,9 +1574,26 @@ class Molten:
                 return
 
             text = "\n".join(lines)
-            # choose register: system clipboard ("+) if bang, else default (")
-            reg = "+" if bang else '"'
-            # set the register
-            self.nvim.funcs.setreg(reg, text)
+            # the system clipboard ("+) with a bang; otherwise the default register ("), plus the
+            # system clipboard when 'clipboard' says the default register is the clipboard (as
+            # with clipboard=unnamedplus, where p pastes from "+ and ignores ")
+            regs = ["+"] if bang else ['"']
+            if not bang:
+                clipboard = str(self.nvim.options.get("clipboard", ""))
+                if "unnamedplus" in clipboard:
+                    regs.append("+")
+                elif "unnamed" in clipboard:
+                    regs.append("*")
+            for reg in regs:
+                try:
+                    self.nvim.funcs.setreg(reg, text)
+                except Exception:
+                    pass  # no clipboard tool available: the default register still has it
+            n = len(text.rstrip("\n").split("\n"))
+            notify_info(
+                self.nvim,
+                f"Copied the output ({n} line{'s' if n != 1 else ''})"
+                + (" to the clipboard" if "+" in regs or "*" in regs else ""),
+            )
             return
 
